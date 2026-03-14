@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vigilant-x"
+version = "0.1.0"
+description = "Agentic C++ code review with formal verification and sandboxed proof-of-concept generation"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    # Multi-agent orchestration
+    "langgraph>=0.2.0",
+    "langchain-core>=0.3.0",
+    "langchain-groq>=0.2.0",
+    "langchain-openai>=0.2.0",
+    "langchain-anthropic>=0.3.0",
+    # Groq SDK (direct, for streaming / tool calls)
+    "groq>=0.9.0",
+    # Formal verification
+    "z3-solver>=4.13.0",
+    # Data models
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    # Neo4j (CPG store)
+    "neo4j>=5.20.0",
+    # GitHub integration
+    "PyGithub>=2.3.0",
+    # Docker SDK (sandbox runner)
+    "docker>=7.1.0",
+    # Subprocess helpers
+    "tenacity>=8.3.0",
+    # CLI & logging
+    "rich>=13.7.0",
+    "typer>=0.12.0",
+    # YAML (Code Law)
+    "pyyaml>=6.0.1",
+    # Hashing / utilities
+    "xxhash>=3.4.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.14.0",
+    "coverage>=7.5.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+]
+
+[project.scripts]
+vigilant-x = "vigilant.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vigilant"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests requiring Docker or external services",
+    "slow: marks tests that take >10s",
+]

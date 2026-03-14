@@ -1,0 +1,52 @@
+# Environment
+.env
+*.env.local
+.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+*.whl
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Sandbox artefacts
+sandbox_tmp/
+repro_*.cpp
+repro_*.bin
+fuzz_corpus/
+
+# Neo4j local data (docker volume)
+neo4j_data/
+
+# Joern installation & workspace
+joern/
+workspace/
+.joern/
+joern-workspace/
+scripts/*.bin
+scripts/*.cpg

@@ -1,0 +1,58 @@
+services:
+  # ── Local Neo4j for testing (USE_LOCAL_NEO4J=true) ──────────────────────────
+  neo4j:
+    image: neo4j:5.19-community
+    container_name: vigilant-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/vigilant_local
+      NEO4J_PLUGINS: '["apoc"]' # APOC for server-side path procedures
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*"
+      NEO4J_server_memory_heap_max__size: "1G"
+      NEO4J_server_memory_pagecache_size: "512M"
+    ports:
+      - "7475:7474" # Browser UI  (avoids clash with existing Neo4j on 7474)
+      - "7688:7687" # Bolt protocol (avoids clash with existing Neo4j on 7687)
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: [ "CMD", "cypher-shell", "-u", "neo4j", "-p", "vigilant_local", "RETURN 1" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ── Main Vigilant-X orchestrator ─────────────────────────────────────────────
+  vigilant-x:
+    build:
+      context: .
+      target: orchestrator
+    container_name: vigilant-orchestrator
+    image: vigilant-x-orchestrator:latest
+    env_file:
+      - .env
+    environment:
+      USE_LOCAL_NEO4J: "true"
+      NEO4J_LOCAL_URI: "bolt://neo4j:7687" # internal container port stays 7687
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    volumes:
+      # Source code mount for analysis (read-only)
+      - ./:/app:ro
+      # Docker socket so orchestrator can spawn sandbox containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: [ "python", "-m", "vigilant.cli", "--help" ]
+
+  # ── Pre-build sandbox image (useful to cache the heavy LLVM layer) ────────────
+  sandbox-build:
+    build:
+      context: .
+      target: sandbox
+    image: vigilant-x-sandbox:latest
+    profiles:
+      - build-only # Only runs with: docker-compose --profile build-only up
+
+volumes:
+  neo4j_data:
+  neo4j_logs:

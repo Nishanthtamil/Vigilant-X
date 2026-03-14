@@ -1,0 +1,138 @@
+"""
+tests/test_concolic_engine.py
+──────────────────────────────
+Unit tests for the Z3 solver and HeuristicPathPruner components.
+No external services required.
+"""
+
+import uuid
+import pytest
+
+from vigilant.analysis.concolic_engine import (
+    ConcolicEngine,
+    HeuristicPathPruner,
+    Z3Solver,
+    Z3UnknownError,
+)
+from vigilant.models import TaintNode, TaintPath, VulnerabilityStatus
+
+
+def _make_path(
+    src_func="get_user_input",
+    snk_func="memcpy",
+    src_file="input.cpp",
+    snk_file="buffer.cpp",
+    crosses_files=True,
+    severity="CRITICAL",
+) -> TaintPath:
+    return TaintPath(
+        path_id=str(uuid.uuid4()),
+        source=TaintNode(
+            node_id=str(uuid.uuid4()),
+            file_path=src_file,
+            function_name=src_func,
+            line_number=10,
+            node_role="SOURCE",
+            label=src_func,
+        ),
+        sink=TaintNode(
+            node_id=str(uuid.uuid4()),
+            file_path=snk_file,
+            function_name=snk_func,
+            line_number=42,
+            node_role="SINK",
+            label=snk_func,
+        ),
+        crosses_files=crosses_files,
+        rule_severity=severity,
+    )
+
+
+# ── Z3 Solver ────────────────────────────────────────────────────────────────
+
+
+class TestZ3Solver:
+    def test_memcpy_path_returns_proven(self):
+        solver = Z3Solver(memory_limit_mb=512)
+        path = _make_path(snk_func="memcpy")
+        status, witnesses, formula = solver.solve(path)
+        assert status == VulnerabilityStatus.PROVEN
+        assert len(witnesses) > 0
+        # Witness should show input_length > buffer_size
+        names = [w.variable for w in witnesses]
+        assert "input_length" in names
+        assert "buffer_size" in names
+
+    def test_free_path_returns_proven(self):
+        solver = Z3Solver(memory_limit_mb=512)
+        path = _make_path(snk_func="free")
+        status, witnesses, formula = solver.solve(path)
+        assert status == VulnerabilityStatus.PROVEN
+        assert "ptr_is_freed" in [w.variable for w in witnesses]
+
+    def test_formula_is_populated(self):
+        solver = Z3Solver(memory_limit_mb=512)
+        path = _make_path(snk_func="strcpy")
+        status, witnesses, formula = solver.solve(path)
+        assert "buffer_size" in formula or "input_length" in formula
+
+    def test_memory_limit_set(self):
+        """Z3 should be initialised without error at a low limit."""
+        solver = Z3Solver(memory_limit_mb=256)
+        assert solver is not None
+
+
+# ── HeuristicPathPruner ───────────────────────────────────────────────────────
+
+
+class TestHeuristicPathPruner:
+    def test_cross_file_scored_higher(self):
+        pruner = HeuristicPathPruner(llm=None)
+        local_path = _make_path(crosses_files=False, snk_func="printf")
+        cross_path = _make_path(crosses_files=True, snk_func="printf")
+        assert pruner._score(cross_path) > pruner._score(local_path)
+
+    def test_high_priority_sink_scored_higher(self):
+        pruner = HeuristicPathPruner(llm=None)
+        low = _make_path(snk_func="printf", crosses_files=False)
+        high = _make_path(snk_func="memcpy", crosses_files=False)
+        assert pruner._score(high) > pruner._score(low)
+
+    def test_prune_caps_at_max(self):
+        pruner = HeuristicPathPruner(llm=None)
+        paths = [_make_path() for _ in range(50)]
+        pruned = pruner.prune(paths)
+        assert len(pruned) <= pruner.MAX_PATHS_BEFORE_LLM
+
+    def test_prune_empty(self):
+        pruner = HeuristicPathPruner(llm=None)
+        assert pruner.prune([]) == []
+
+
+# ── ConcolicEngine ────────────────────────────────────────────────────────────
+
+
+class TestConcolicEngine:
+    def test_advisory_paths_skip_z3(self):
+        engine = ConcolicEngine.__new__(ConcolicEngine)
+        engine.llm = None
+        engine.pruner = HeuristicPathPruner(llm=None)
+        engine.z3_solver = Z3Solver(memory_limit_mb=256)
+        engine.fuzzer = None  # type: ignore[assignment]
+
+        advisory = _make_path(severity="ADVISORY")
+        vulns = engine.analyze([advisory])
+        assert len(vulns) == 1
+        assert vulns[0].status == VulnerabilityStatus.ADVISORY
+
+    def test_critical_memcpy_proven(self):
+        engine = ConcolicEngine.__new__(ConcolicEngine)
+        engine.llm = None
+        engine.pruner = HeuristicPathPruner(llm=None)
+        engine.z3_solver = Z3Solver(memory_limit_mb=256)
+        engine.fuzzer = None  # type: ignore[assignment]
+
+        critical = _make_path(snk_func="memcpy", severity="CRITICAL")
+        vulns = engine.analyze([critical])
+        assert len(vulns) == 1
+        assert vulns[0].status in {VulnerabilityStatus.PROVEN, VulnerabilityStatus.WARNING}
