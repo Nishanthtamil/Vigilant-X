@@ -2,11 +2,11 @@
 
 > **Agentic C++ Security Reviewer with Semantic Formal Verification and Mirror Sandbox Analysis.**
 
-Vigilant-X is architected to be **10x better than Code Rabbit** by moving beyond heuristic-based linting into **Semantic Formal Proof**. It traces data flow across global project boundaries, transpiles complex C++ logic into **Z3 SMT constraints**, and verifies every finding in a **Mirror Docker Sandbox** using multiple compilers and optimization levels.
+Vigilant-X is architected to be **10x better than Code Rabbit** by moving beyond heuristic-based linting into **Semantic Formal Proof**. It traces data flow across global project boundaries, transpiles complex C++ logic into **Z3 SMT constraints**, and verifies every finding in a **Secure Docker Sandbox** using multiple compilers and optimization levels.
 
 ---
 
-## 🏗 System Architecture (The 4 intelligence Planes)
+## 🏗 System Architecture (The 4 Intelligence Planes)
 
 ```mermaid
 graph TD
@@ -19,19 +19,20 @@ graph TD
     subgraph Analysis_Plane
         F[TaintTracker] --> G[Virtual Dispatch Bridge]
         G --> H[Library Summary Injection]
-        I[Concolic Engine] --> J[LLM-to-Z3 Transpiler]
-        J --> K[Exception-Path Detection]
+        I[Concolic Engine] --> J[LLM-to-Z3 SMT-LIBv2]
+        J --> K[Self-Correcting Formal Proof]
     end
 
     subgraph Validation_Plane
-        L[PoC Generator] --> M[Mirror Sandbox]
+        L[PoC Generator] --> M[Hardened Sandbox]
         M --> N[Verification Matrix: Clang/GCC + O1/O3]
         N --> O[LLVM Sanitizers: ASan/MSan/TSan]
     end
 
     subgraph Communication_Plane
         P[Reviewer LLM] --> Q[Verified C++20/23 Fixes]
-        Q --> R[GitHub PR Commenter]
+        Q --> R[GitHub Native Inline Review]
+        R --> S[Actionable Suggested Changes]
     end
 
     Ingestion_Plane --> Analysis_Plane
@@ -40,11 +41,12 @@ graph TD
 ```
 
 ### 🛡️ Why Vigilant-X is 10x Better:
-1.  **Semantic Formal Proof**: Unlike standard linters, Vigilant-X uses an **LLM-to-Z3 Bridge** to model C++ object lifetimes (RAII), smart pointers, and complex logic that typically blinds static analyzers.
-2.  **Global Data Flow**: Uses **Neo4j + APOC** to trace tainted data across dozens of files and 30+ levels of function calls.
-3.  **Zero False Positives**: Every "Proven" vulnerability is backed by a compiled PoC that **actually crashed** in a sandboxed environment.
-4.  **Verification Matrix**: Executes PoCs across multiple compilers and optimization levels to catch bugs that only manifest at `-O3` or under specific compiler behaviors.
-5.  **Autonomous API Discovery**: Automatically identifies project-specific dangerous APIs (Network, IO, custom logs) without manual configuration.
+1.  **Formal Proof over Guesswork**: Vigilant-X uses a **Self-Correcting LLM-to-Z3 Bridge** that transpiles C++ to **SMT-LIBv2**. Findings are mathematically proven by the Z3 solver, not just "guessed" by an LLM.
+2.  **Global Data Flow**: Traces tainted data across project boundaries using **Neo4j + APOC**, reaching 30+ levels of deep function calls.
+3.  **Zero-Noise Verification**: Every "Proven" vulnerability is backed by a compiled PoC that **actually crashed** in a sandboxed environment.
+4.  **GitHub Native Workflow**: Posts findings as professional **GitHub Reviews** with **Inline Comments** and **Suggested Changes**, allowing one-click remediation.
+5.  **Verified Fixes**: Every suggested fix is **automatically re-verified in the sandbox** before being reported, ensuring the patch is effective and doesn't introduce regressions.
+6.  **Security First Architecture**: Hardened against malicious repositories with a **Secure Sandbox** (ignores untrusted Dockerfiles) and a **Safe Formal Engine** (no `exec()` on LLM output).
 
 ---
 
@@ -62,35 +64,30 @@ pip install -e ".[dev]"
 
 ```bash
 cp .env.example .env
-# Required: GROQ_API_KEY (or OpenAI/Anthropic)
+# Required: GROQ_API_KEY, GITHUB_TOKEN
 ```
 
 ### 3. Start Infrastructure
 
 ```bash
 docker-compose up neo4j -d
-# Neo4j is mapped to Port 7688 to avoid conflicts
 ```
 
 ### 4. Run a Deep Security Review
 
 ```bash
 vigilant-x review \
-  --repo examples/ComBSTRDemo \
-  --pr-number 0 \
-  --dry-run
+  --repo owner/repo \
+  --pr-number 123
 ```
-
-Expected output: Formal proof of a BSTR memory leak, an overwrite hazard, and a fully refactored C++20 fix using `CComBSTR` and `std::wstring_view`.
 
 ---
 
 ## 🧪 Testing
 
-Vigilant-X includes a comprehensive test suite covering the LLM-Z3 bridge, Graph expansion, and Sandbox execution.
+Vigilant-X includes a comprehensive test suite covering the formal bridge, sandbox isolation, and GitHub integration.
 
 ```bash
-# Run all tests (all 19 tests must pass)
 pytest tests/
 ```
 
@@ -103,9 +100,9 @@ pytest tests/
 | **Orchestration** | Python 3.12 + LangGraph |
 | **LLM Engine** | Meta-Llama 4 (Scout) / GPT-4o / Claude 3.5 |
 | **Knowledge Graph** | Neo4j (APOC) + Joern CPG |
-| **Formal Logic** | Z3 SMT Solver (via Dynamic Transpiler) |
+| **Formal Logic** | Z3 SMT Solver (via SMT-LIBv2 Transpiler) |
 | **Sandboxing** | Docker + LLVM Sanitizers (ASan, MSan, TSan, UBSan) |
-| **Build Support** | `compile_commands.json` (Mirroring) |
+| **GitHub Integration** | PyGithub (Review Threads + Suggested Changes) |
 
 ---
 
