@@ -52,10 +52,8 @@ def crashing_poc():
 // Vigilant-X test: intentional heap-buffer-overflow for sandbox validation
 int main() {
     char* buf = (char*)malloc(64);
-    char input[128];
-    memset(input, 'A', sizeof(input));
-    // ASan should catch this: copying 128 bytes into a 64-byte heap buffer
-    memcpy(buf, input, 128);
+    // Explicit heap buffer overflow
+    buf[128] = 'A';
     free(buf);
     return 0;
 }

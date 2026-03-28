@@ -34,6 +34,8 @@ class PRIntent(BaseModel):
     changed_modules: list[str] = Field(default_factory=list)
     risk_areas: list[str] = Field(default_factory=list)
     code_law_violations_suspected: list[str] = Field(default_factory=list)
+    dynamic_sources: list[str] = Field(default_factory=list)
+    dynamic_sinks: list[str] = Field(default_factory=list)
 
 
 class CPGNode(BaseModel):
@@ -141,6 +143,10 @@ class SandboxResult(BaseModel):
 class Fix(BaseModel):
     description: str
     diff: str         # unified diff format
+    suggestion: str = ""  # The literal fixed code block for GitHub suggestion
+    file_path: str = ""
+    line_start: int = 0
+    line_end: int = 0
     cpp_standard: str = "C++20"   # C++17 | C++20 | C++23
     fix_sandbox_result: SandboxResult | None = None  # Sandbox run of the fix itself
 

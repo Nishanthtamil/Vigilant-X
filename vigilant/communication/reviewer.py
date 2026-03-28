@@ -30,13 +30,24 @@ Your analysis must:
 1. Explain the ROOT CAUSE in plain English — why the cross-file logic failed.
 2. Provide a MODERN C++20/23 FIX using std::span, std::expected, std::unique_ptr, 
    std::string_view, std::ranges, or std::format where appropriate.
-3. Output ONLY valid GitHub Markdown. No XML, no JSON.
+3. Output the fix as a GITHUB SUGGESTION block if it is a single-file fix.
+4. Provide the exact file path, start line, and end line for the fix.
 
 Format:
 ### Root Cause
 <explanation>
 
+### File Metadata
+File: <path>
+Start Line: <number>
+End Line: <number>
+
 ### Verified Fix
+```suggestion
+<fixed code lines only>
+```
+
+### Unified Diff
 ```diff
 - <vulnerable line(s)>
 + <fixed line(s)>
@@ -44,7 +55,6 @@ Format:
 
 ### Why This Fix Works
 <one sentence>"""
-
 
 class Reviewer:
     """Generates the final Gold Standard review report."""
@@ -132,7 +142,7 @@ Z3 Formula: {vuln.z3_formula or "(none)"}
 Witnesses: {', '.join(f"{w.variable}={w.value}" for w in vuln.witness_values) or "(fuzzer-found)"}
 {evidence}
 
-Provide the root cause explanation and a C++20/23 fix diff.
+Provide the root cause explanation and a C++20/23 fix suggestion.
 """
         try:
             raw = self.llm.ask(
@@ -142,9 +152,22 @@ Provide the root cause explanation and a C++20/23 fix diff.
                 max_tokens=1500,
             )
             diff = self._extract_diff(raw)
+            suggestion = self._extract_suggestion(raw)
+            file_path, line_start, line_end = self._extract_metadata(raw)
+            
+            # Fallback to sink node if LLM fails to provide metadata
+            if not file_path:
+                file_path = path.sink.file_path
+                line_start = path.sink.line_number
+                line_end = path.sink.line_number
+
             return Fix(
                 description=raw,
                 diff=diff,
+                suggestion=suggestion,
+                file_path=file_path,
+                line_start=line_start,
+                line_end=line_end,
                 cpp_standard="C++20",
             )
         except Exception as e:
@@ -153,6 +176,9 @@ Provide the root cause explanation and a C++20/23 fix diff.
                 description=f"Fix generation failed: {e}",
                 diff="",
                 cpp_standard="C++20",
+                file_path=path.sink.file_path,
+                line_start=path.sink.line_number,
+                line_end=path.sink.line_number,
             )
 
     @staticmethod
@@ -160,6 +186,25 @@ Provide the root cause explanation and a C++20/23 fix diff.
         """Extract the first diff block from the LLM response."""
         match = re.search(r"```diff\n(.+?)```", text, re.DOTALL)
         return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _extract_suggestion(text: str) -> str:
+        """Extract the github suggestion block."""
+        match = re.search(r"```suggestion\n(.+?)```", text, re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    @staticmethod
+    def _extract_metadata(text: str) -> tuple[str, int, int]:
+        """Extract file path, start line, and end line from text."""
+        file_match = re.search(r"File: (.+)", text)
+        start_match = re.search(r"Start Line: (\d+)", text)
+        end_match = re.search(r"End Line: (\d+)", text)
+        
+        file_path = file_match.group(1).strip() if file_match else ""
+        line_start = int(start_match.group(1)) if start_match else 0
+        line_end = int(end_match.group(1)) if end_match else 0
+        
+        return file_path, line_start, line_end
 
     @staticmethod
     def _make_fix_poc(

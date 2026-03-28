@@ -34,6 +34,9 @@ TAINT_SOURCES = [
     "readlink", "getopt", "getopt_long",
     # Uninitialized allocations (sources of uninit data)
     "malloc", "calloc", "realloc", "mmap",
+    # COM/BSTR sources
+    "SysAllocString", "SysAllocStringLen", "SysAllocStringByteLen",
+    "CoTaskMemAlloc",
     # Modern C++ sources
     "std::cin", "std::ifstream", "std::getline",
     "std::unique_ptr::release",  # source for use-after-free tracking
@@ -47,8 +50,10 @@ TAINT_SINKS = [
     "strcpy", "strncpy", "strncat", "strtok",
     # Command/System injection
     "system", "popen", "exec", "execve", "execl", "execv", "execvp",
-    # Memory management (sinks for double-free/UAF)
+    # Memory management (sinks for double-free/UAF/Leaks)
     "free", "delete", "operator delete",
+    "SysFreeString", "CoTaskMemFree",
+    "CopyTo", "Attach", "Detach", # CComBSTR / CComPtr sinks
     "std::unique_ptr::reset",
     # Threading/Concurrency (sinks for data races)
     "std::thread", "pthread_create", "fork",
@@ -62,15 +67,15 @@ TAINT_SINKS = [
 # server-side path expansion. Now prioritizes PDG (REACHING_DEF) and CALL edges.
 _APOC_PATH_QUERY = """
 MATCH (source:CPGNode)
-WHERE any(s IN $sources WHERE source.function_name CONTAINS s)
+WHERE source.function_name IN $sources AND source.node_type CONTAINS 'CALL'
 
 MATCH (sink:CPGNode)
-WHERE any(sk IN $sinks WHERE sink.function_name CONTAINS sk)
+WHERE sink.function_name IN $sinks AND sink.node_type CONTAINS 'CALL'
 
 CALL apoc.path.expandConfig(source, {
-    relationshipFilter: "CALL>|REACHING_DEF>|REF>",
+    relationshipFilter: "CALL>|REACHING_DEF>|REF>|ALIAS>",
     minLevel: 1,
-    maxLevel: 20,
+    maxLevel: 30,
     terminatorNodes: [sink],
     uniqueness: "NODE_PATH"
 })
@@ -100,8 +105,8 @@ LIMIT 100
 # Fallback query using modern labels
 _FALLBACK_PATH_QUERY = """
 MATCH path = (source:CPGNode)-[:CALL|REACHING_DEF|REF*1..15]->(sink:CPGNode)
-WHERE any(s IN $sources WHERE source.function_name CONTAINS s)
-  AND any(sk IN $sinks WHERE sink.function_name CONTAINS sk)
+WHERE source.function_name IN $sources AND source.node_type CONTAINS 'CALL'
+  AND sink.function_name IN $sinks AND sink.node_type CONTAINS 'CALL'
 RETURN
     source.node_id AS src_id,
     source.file_path AS src_file,
@@ -145,6 +150,7 @@ class TaintTracker:
 
     def find_taint_paths(
         self,
+        pr_intent: Any | None = None,
         extra_sources: list[str] | None = None,
         extra_sinks: list[str] | None = None,
     ) -> list[TaintPath]:
@@ -152,11 +158,20 @@ class TaintTracker:
         Walk the CPG and return all source→sink taint paths.
 
         Args:
+            pr_intent: PRIntent containing dynamically detected sinks.
             extra_sources: Additional source patterns from Code Law rules.
             extra_sinks: Additional sink patterns from Code Law rules.
         """
         sources = list(TAINT_SOURCES) + (extra_sources or [])
         sinks = list(TAINT_SINKS) + (extra_sinks or [])
+
+        # Add dynamic sources/sinks from intent parser
+        if pr_intent:
+            sources.extend(getattr(pr_intent, "dynamic_sources", []))
+            sinks.extend(getattr(pr_intent, "dynamic_sinks", []))
+
+        self._bridge_opaque_binaries()
+        self._resolve_virtual_calls()
 
         logger.info(
             "TaintTracker: searching %d sources × %d sinks via %s",
@@ -173,6 +188,59 @@ class TaintTracker:
 
         logger.info("TaintTracker: found %d taint paths", len(paths))
         return paths
+
+    def _bridge_opaque_binaries(self) -> None:
+        """
+        Injects REACHING_DEF edges into the graph for known library functions
+        (like memcpy, std::copy) where the internal implementation is opaque
+        but the data flow summary is known (arg1 -> arg0).
+        """
+        logger.info("TaintTracker: bridging opaque binaries with library summaries")
+        with self.driver.session() as session:
+            query = """
+            MATCH (call:CPGNode)
+            WHERE call.node_type CONTAINS 'CALL' AND (
+                call.function_name IN ['memcpy', 'memmove', 'strcpy', 'strncpy', 'std::copy', 'std::copy_n']
+                OR call.function_name CONTAINS 'copy'
+            )
+            WITH call
+            MATCH (in)-[:REACHING_DEF|CALL]->(call)-[:REACHING_DEF|CALL]->(out)
+            MERGE (in)-[:REACHING_DEF {summary: true}]->(out)
+            RETURN count(*) AS bridges
+            """
+            try:
+                result = session.run(query)
+                bridges = result.single()["bridges"]
+                logger.info("TaintTracker: created %d summary bridges", bridges)
+            except Exception as e:
+                logger.debug("TaintTracker: bridging opaque binaries failed: %s", e)
+
+    def _resolve_virtual_calls(self) -> None:
+        """
+        Heuristic: Resolves virtual/indirect calls by linking CALL nodes to 
+        concrete function implementations with matching names/parameters.
+        """
+        logger.info("TaintTracker: resolving virtual and indirect calls")
+        with self.driver.session() as session:
+            query = """
+            MATCH (call:CPGNode)-[:CALL]->(abstract_target:CPGNode)
+            WHERE call.node_type CONTAINS 'CALL' AND abstract_target.node_type = 'AST_FUNC'
+
+            MATCH (concrete_impl:CPGNode)
+            WHERE concrete_impl.node_type = 'AST_FUNC' 
+              AND concrete_impl.function_name = abstract_target.function_name
+              AND concrete_impl.node_id <> abstract_target.node_id
+
+            MERGE (call)-[:CALL {resolved_virtual: true}]->(concrete_impl)
+            RETURN count(*) AS resolutions
+            """
+            try:
+                result = session.run(query)
+                count = result.single()["resolutions"]
+                if count > 0:
+                    logger.info("TaintTracker: resolved %d virtual dispatch paths", count)
+            except Exception as e:
+                logger.debug("TaintTracker: virtual resolution failed: %s", e)
 
     # ── APOC availability check ───────────────────────────────────────────────
 

@@ -260,23 +260,32 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
                 cline = line_start + body[: call.start()].count("\n")
                 cid = str(uuid.uuid4())
 
+                # Always add the call node so dynamic/semantic sinks can be found
+                node_type = "CALL"
                 if cname in SOURCES:
-                    nodes.append({
-                        "node_id": cid, "file_path": str(p.relative_to(repo_path) if p.is_relative_to(repo_path) else p),
-                        "function_name": cname, "line_start": cline, "line_end": cline,
-                        "node_type": "CALL_SOURCE", "code": call.group(0),
-                    })
-                    edges.append({"src": cid, "dst": func_id, "type": "CALL"})
+                    node_type = "CALL_SOURCE"
                 elif cname in SINKS:
-                    nodes.append({
-                        "node_id": cid, "file_path": str(p.relative_to(repo_path) if p.is_relative_to(repo_path) else p),
-                        "function_name": cname, "line_start": cline, "line_end": cline,
-                        "node_type": "CALL_SINK", "code": call.group(0),
-                    })
+                    node_type = "CALL_SINK"
+
+                nodes.append({
+                    "node_id": cid, 
+                    "file_path": str(p.relative_to(repo_path) if p.is_relative_to(repo_path) else p),
+                    "function_name": cname, 
+                    "line_start": cline, 
+                    "line_end": cline,
+                    "node_type": node_type, 
+                    "code": call.group(0),
+                })
+                
+                # Link source function to this call
+                if node_type == "CALL_SOURCE":
+                    edges.append({"src": cid, "dst": func_id, "type": "CALL"})
+                else:
                     edges.append({"src": func_id, "dst": cid, "type": "CALL"})
-                elif cname in func_name_to_id:
-                    # Internal function call
-                    edges.append({"src": func_id, "dst": func_name_to_id[cname], "type": "CALL"})
+
+                # If it's an internal function, also link this call node to the target function definition
+                if cname in func_name_to_id:
+                    edges.append({"src": cid, "dst": func_name_to_id[cname], "type": "CALL"})
 
     return {"nodes": nodes, "edges": edges}
 
@@ -332,6 +341,24 @@ class CPGBuilder:
         nodes = raw_cpg.get("nodes", [])
         edges = raw_cpg.get("edges", [])
 
+        # Map local Joern IDs to global unique IDs
+        id_map: dict[str, str] = {}
+        for node_data in nodes:
+            local_id = str(node_data.get("node_id", ""))
+            rel_path = node_data.get("file_path", "")
+            if local_id:
+                global_id = hashlib.sha256(f"{rel_path}:{local_id}".encode()).hexdigest()
+                id_map[local_id] = global_id
+                node_data["node_id"] = global_id
+
+        for edge in edges:
+            src_local = str(edge.get("src", ""))
+            dst_local = str(edge.get("dst", ""))
+            if src_local in id_map:
+                edge["src"] = id_map[src_local]
+            if dst_local in id_map:
+                edge["dst"] = id_map[dst_local]
+
         created = 0
         with self.driver.session() as session:
             # Clear existing graph
@@ -376,80 +403,80 @@ class CPGBuilder:
     def _incremental_update(self, repo_path: Path, changed_files: list[str]) -> CPGSummary:
         """
         For each changed file:
-        1. Parse with Joern (file-scoped).
-        2. For each node in the new parse, compute SHA-256 (if it's a function).
-        3. Compare with the hash stored in Neo4j.
-        4. Delete stale nodes, insert new/modified nodes only.
+        1. Clear existing nodes in Neo4j to avoid ID collisions.
+        2. Parse with Joern (file-scoped).
+        3. Insert new nodes and edges.
         """
         created = updated = unchanged = edge_count = 0
 
         for rel_path in changed_files:
             abs_path = repo_path / rel_path
+            
+            # Always clear existing nodes for the file before re-ingesting
+            # This is the "clean upsert" strategy to avoid Neo.ClientError.Schema.ConstraintValidationFailed
+            self._delete_file_nodes(rel_path)
+            
             if not abs_path.exists():
-                # File deleted — remove its nodes
-                self._delete_file_nodes(rel_path)
+                # File was actually deleted
                 continue
 
             raw_cpg = _run_joern(repo_path, files=[str(abs_path)])
             new_nodes = raw_cpg.get("nodes", [])
             new_edges = raw_cpg.get("edges", [])
 
+            # Map local Joern IDs to global unique IDs
+            id_map: dict[str, str] = {}
+            for node_data in new_nodes:
+                local_id = str(node_data.get("node_id", ""))
+                if local_id:
+                    global_id = hashlib.sha256(f"{rel_path}:{local_id}".encode()).hexdigest()
+                    id_map[local_id] = global_id
+                    node_data["node_id"] = global_id
+
+            for edge in new_edges:
+                src_local = str(edge.get("src", ""))
+                dst_local = str(edge.get("dst", ""))
+                if src_local in id_map:
+                    edge["src"] = id_map[src_local]
+                if dst_local in id_map:
+                    edge["dst"] = id_map[dst_local]
+
             with self.driver.session() as session:
                 for node_data in new_nodes:
                     node_type = node_data.get("node_type", "AST_FUNC")
                     code_text = node_data.get("code", "")
                     new_hash = hash_function_content(code_text)
+                    node_id = node_data.get("node_id", str(uuid.uuid4()))
                     
-                    # For Joern nodes, node_id is stable within a parse session but might 
-                    # change across sessions. However, file_path + line_start + node_type 
-                    # is a decent heuristic for node identity in incremental updates.
-                    node_id = node_data.get("node_id")
-                    
-                    existing = session.run(
-                        """
-                        MATCH (n:CPGNode {file_path: $fp, node_type: $nt, line_start: $ls, function_name: $fn}) 
-                        RETURN n.content_hash AS h
-                        """,
-                        fp=rel_path, nt=node_type, ls=int(node_data.get("line_start", 0)),
-                        fn=node_data.get("function_name", "")
-                    ).single()
-
-                    if existing and existing["h"] == new_hash:
-                        unchanged += 1
-                        continue
-
-                    # Upsert the node
                     session.run(
                         """
-                        MERGE (n:CPGNode {file_path: $file_path, node_type: $node_type, line_start: $line_start, function_name: $function_name})
+                        MERGE (n:CPGNode {node_id: $node_id})
                         SET n += {
-                            node_id: $node_id,
+                            file_path: $file_path,
+                            function_name: $function_name,
+                            line_start: $line_start,
                             line_end: $line_end,
+                            node_type: $node_type,
                             code: $code,
                             content_hash: $content_hash
                         }
                         """,
                         node_id=node_id,
                         file_path=rel_path,
-                        node_type=node_type,
-                        line_start=int(node_data.get("line_start", 0)),
                         function_name=node_data.get("function_name", ""),
+                        line_start=int(node_data.get("line_start", 0)),
                         line_end=int(node_data.get("line_end", 0)),
+                        node_type=node_type,
                         code=code_text,
                         content_hash=new_hash,
                     )
-                    if existing:
-                        updated += 1
-                    else:
-                        created += 1
+                    created += 1
 
                 # Write edges for this file's updated nodes
                 edge_count += self._write_edges(session, new_edges)
 
         return CPGSummary(
             nodes_created=created,
-            nodes_updated=updated,
-            nodes_unchanged=unchanged,
             edges_created=edge_count,
             ingestion_mode="incremental",
         )

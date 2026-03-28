@@ -86,24 +86,36 @@ class LLMClient:
         temperature: float = 0.2,
         max_tokens: int = 4096,
     ) -> str:
-        """
-        Send a chat completion and return the assistant's text content.
-
-        Args:
-            messages: List of {"role": "system"|"user"|"assistant", "content": str}
-            temperature: Sampling temperature (lower = more deterministic)
-            max_tokens: Max response tokens
-
-        Returns:
-            The assistant's response as a plain string.
-        """
-        if self.provider == LLMProvider.GROQ:
-            return self._chat_groq(messages, temperature, max_tokens)
-        elif self.provider == LLMProvider.OPENAI:
-            return self._chat_openai(messages, temperature, max_tokens)
-        elif self.provider == LLMProvider.ANTHROPIC:
-            return self._chat_anthropic(messages, temperature, max_tokens)
+        try:
+            if self.provider == LLMProvider.GROQ:
+                return self._chat_groq(messages, temperature, max_tokens)
+            elif self.provider == LLMProvider.OPENAI:
+                return self._chat_openai(messages, temperature, max_tokens)
+            elif self.provider == LLMProvider.ANTHROPIC:
+                return self._chat_anthropic(messages, temperature, max_tokens)
+        except Exception as e:
+            if "rate_limit_exceeded" in str(e).lower() or "429" in str(e):
+                logger.warning("LLMClient: Rate limit exceeded for %s. Attempting fallback.", self.provider)
+                return self._fallback_chat(messages, temperature, max_tokens)
+            raise e
         raise ValueError(f"Unknown provider: {self.provider}")
+
+    def _fallback_chat(self, messages: list[dict[str, str]], temperature: float, max_tokens: int) -> str:
+        # Try OpenAI if not already used
+        if self.provider != LLMProvider.OPENAI and self.settings.openai_api_key:
+            logger.info("LLMClient: Falling back to OpenAI")
+            self.provider = LLMProvider.OPENAI
+            self._init_openai()
+            return self._chat_openai(messages, temperature, max_tokens)
+        
+        # Try Anthropic
+        if self.provider != LLMProvider.ANTHROPIC and self.settings.anthropic_api_key:
+            logger.info("LLMClient: Falling back to Anthropic")
+            self.provider = LLMProvider.ANTHROPIC
+            self._init_anthropic()
+            return self._chat_anthropic(messages, temperature, max_tokens)
+            
+        raise RuntimeError("LLMClient: All fallback providers failed or were not configured.")
 
     # ── Provider implementations ──────────────────────────────────────────────
 

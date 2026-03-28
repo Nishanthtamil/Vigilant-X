@@ -22,26 +22,23 @@ class PRCommenter:
 
     def post(self, report: ReviewReport, dry_run: bool = False) -> ReviewReport:
         """
-        Post the report markdown as a PR comment.
-
-        Args:
-            report: The ReviewReport to post.
-            dry_run: If True, print the comment instead of posting it.
-
-        Returns:
-            The report, with posted_comment_url filled in (or dry_run URL).
+        Post the report as a single GitHub PR Review with inline comments.
         """
         if dry_run:
             from rich.console import Console
             from rich.markdown import Markdown
             console = Console()
-            console.rule("[bold blue]Vigilant-X Dry-Run Report")
+            console.rule("[bold blue]Vigilant-X Dry-Run Review")
             console.print(Markdown(report.markdown_body))
+            for vuln_id, fix in report.fixes.items():
+                if fix.suggestion:
+                    console.print(f"\n[bold green]Suggestion for {fix.file_path}:{fix.line_start}-{fix.line_end}:")
+                    console.print(fix.suggestion)
             report.posted_comment_url = "dry-run://no-post"
             return report
 
         if not self.settings.github_token:
-            logger.error("PRCommenter: GITHUB_TOKEN not set. Cannot post comment.")
+            logger.error("PRCommenter: GITHUB_TOKEN not set. Cannot post review.")
             return report
 
         try:
@@ -50,17 +47,41 @@ class PRCommenter:
             repo = g.get_repo(report.github_repo)
             pr = repo.get_pull(report.pr_number)
 
-            # Delete existing Vigilant-X bot comments (avoid spam on re-run)
-            for old_comment in pr.get_issue_comments():
-                if "Vigilant-X" in old_comment.body:
-                    old_comment.delete()
-                    logger.info("PRCommenter: removed old Vigilant-X comment")
+            # 1. Prepare inline comments
+            comments = []
+            for vuln in report.vulnerabilities:
+                fix = report.fixes.get(vuln.vuln_id)
+                if not fix or not fix.file_path:
+                    continue
+                
+                body = f"### 🔴 Vigilant-X: {vuln.summary}\n\n"
+                if fix.description:
+                    body += fix.description
+                
+                # If we have a suggestion, wrap it in a suggestion block if not already there
+                if fix.suggestion and "```suggestion" not in body:
+                    body += f"\n\n```suggestion\n{fix.suggestion}\n```"
 
-            comment = pr.create_issue_comment(report.markdown_body)
-            report.posted_comment_url = comment.html_url
-            logger.info("PRCommenter: posted review to %s", comment.html_url)
+                comments.append({
+                    "path": fix.file_path,
+                    "line": fix.line_end, # Post at the end of the range
+                    "body": body,
+                    "side": "RIGHT"
+                })
+
+            # 2. Submit as a single Review
+            # Note: create_review accepts comments in a specific format
+            # and a top-level summary body.
+            pr.create_review(
+                body=report.markdown_body,
+                event="COMMENT", # Or "REQUEST_CHANGES" if critical
+                comments=comments
+            )
+            
+            logger.info("PRCommenter: posted review with %d inline comments", len(comments))
+            report.posted_comment_url = f"https://github.com/{report.github_repo}/pull/{report.pr_number}/files"
 
         except Exception as e:
-            logger.error("PRCommenter: failed to post comment: %s", e)
+            logger.error("PRCommenter: failed to post review: %s", e)
 
         return report

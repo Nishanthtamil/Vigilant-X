@@ -78,23 +78,51 @@ class SandboxRunner:
             sanitizer_type = self._infer_sanitizer(vuln)
             
             compiler_info = self.build_inf.sandbox_compiler_flags()
-            compile_cmd = self._build_compile_cmd(
-                repro_src, compiler_info, poc.content, sanitizer_type
-            )
             
-            # Use relative paths for the container: working_dir is /workspace/build
-            container_src = poc.file_name
-            container_bin = "./repro"
+            # --- Verification Matrix ---
+            file_meta = {"opt_level": "-O1", "flags": []}
+            if vuln.taint_path and vuln.taint_path.sink and vuln.taint_path.sink.file_path:
+                file_meta = self.build_inf.get_file_metadata(vuln.taint_path.sink.file_path)
 
-            full_cmd = compile_cmd + ["-o", container_bin, container_src]
-            run_cmd = [container_bin]
+            # Matrix: [ (OptLevel, Compiler) ]
+            # We always run the project's own level first, then fall back to high optimization 
+            # to detect optimization-induced UB.
+            matrix = [
+                (file_meta.get("opt_level", "-O1"), "clang++"),
+                ("-O3", "clang++"),  # Catch UB optimized away or introduced at O3
+                ("-O2", "g++")       # Cross-compiler validation if available
+            ]
 
-            return self._run_in_docker(
-                tmp_path,
-                compile_cmd=full_cmd,
-                run_cmd=run_cmd,
-                compiler_override=True, # Sanitizers usually require clang++ override
-            )
+            final_result = SandboxResult(passed=True)
+            for opt_level, compiler_override in matrix:
+                logger.info("SandboxRunner: running matrix entry (%s, %s)", opt_level, compiler_override)
+                compile_cmd = self._build_compile_cmd(
+                    repro_src, compiler_info, poc.content, sanitizer_type, 
+                    file_meta.get("flags", []), opt_level, compiler_override
+                )
+                
+                # Use relative paths for the container: working_dir is /workspace/build
+                container_src = poc.file_name
+                container_bin = "./repro"
+
+                full_cmd = compile_cmd + ["-o", container_bin, container_src]
+                run_cmd = [container_bin]
+
+                current_result = self._run_in_docker(
+                    tmp_path,
+                    compile_cmd=full_cmd,
+                    run_cmd=run_cmd,
+                    compiler_override=True, 
+                )
+                
+                if not current_result.passed:
+                    # Found a crash! Return this result as it's the most critical
+                    logger.info("SandboxRunner: vulnerability verified in matrix entry (%s, %s)", opt_level, compiler_override)
+                    return current_result
+                
+                final_result = current_result # Keep the last clean result if none fail
+
+            return final_result
 
     def _infer_sanitizer(self, vuln: Vulnerability) -> str:
         """
@@ -199,17 +227,18 @@ class SandboxRunner:
     # ── Build helpers ─────────────────────────────────────────────────────────
 
     def _build_compile_cmd(
-        self, src: Path, compiler_info: dict, poc_content: str = "", sanitizer: str = "address,undefined"
+        self, src: Path, compiler_info: dict, poc_content: str = "", sanitizer: str = "address,undefined", 
+        extra_flags: list[str] | None = None, opt_level: str = "-O1", compiler_override: str = "clang++"
     ) -> list[str]:
-        # Always prefer clang++ for sanitizer compatibility
-        compiler = "clang++"
+        # Always prefer clang++ for sanitizer compatibility; g++ for cross-verification if available
+        compiler = compiler_override
         
         # MSan requires track-origins for better debugging
-        flags = [f"-fsanitize={sanitizer}", "-fno-omit-frame-pointer", "-g", "-O1"]
+        flags = [f"-fsanitize={sanitizer}", "-fno-omit-frame-pointer", "-g", opt_level]
         if sanitizer == "memory":
             flags.append("-fsanitize-memory-track-origins")
             
-        cmd = [compiler, "-std=c++20"] + flags + ["-lgtest", "-lpthread"]
+        cmd = [compiler, "-std=c++20"] + flags + (extra_flags or []) + ["-lgtest", "-lpthread"]
         if "int main(" not in poc_content:
             cmd.append("-lgtest_main")
         return cmd
@@ -217,32 +246,13 @@ class SandboxRunner:
 
     def _resolve_image(self) -> str:
         """
-        Prefer the project's own devcontainer/Dockerfile for binary compatibility;
-        fall back to the Vigilant-X sandbox image.
+        Always use the trusted Vigilant-X sandbox image.
+        Project-specific Dockerfiles are ignored for security reasons (sandbox escape prevention).
         """
-        if self.build_inf.has_devcontainer:
-            logger.info("SandboxRunner: using project devcontainer")
-            # Attempt to use the devcontainer image name; fall through on failure
-            devcontainer_image = self._read_devcontainer_image()
-            if devcontainer_image:
-                return devcontainer_image
-
-        if self.build_inf.has_project_dockerfile:
-            logger.info("SandboxRunner: project has its own Dockerfile, using vigilant-sandbox as fallback")
-
+        if self.build_inf.has_project_dockerfile or self.build_inf.has_devcontainer:
+            logger.warning("SandboxRunner: Project has a Dockerfile/devcontainer, but it is ignored for security. Using trusted base image.")
+            
         return self.settings.sandbox_image
-
-    def _read_devcontainer_image(self) -> str | None:
-        import json
-        for candidate in [".devcontainer/devcontainer.json", ".devcontainer.json"]:
-            dc = self.repo_path / candidate
-            if dc.exists():
-                try:
-                    data = json.loads(dc.read_text())
-                    return data.get("image")
-                except Exception:
-                    pass
-        return None
 
     # ── Output parsing ────────────────────────────────────────────────────────
 

@@ -14,10 +14,10 @@
           .replace("\t", "\\t")
   }
 
-  // Export Methods, Calls, and ControlStructures for full PDG support
-  val nodesList = (cpg.method.l ++ cpg.call.l ++ cpg.controlStructure.l).map { n =>
+  // Export a wider set of nodes for better taint tracking
+  val nodesList = (cpg.method.l ++ cpg.call.l ++ cpg.controlStructure.l ++ cpg.methodParameterIn.l ++ cpg.local.l ++ cpg.identifier.l).map { n =>
     val id = n.id().toString
-    val lbl = n.label // Property, not a method call
+    val lbl = n.label
     
     val filenameAny = n match {
       case m: io.shiftleft.codepropertygraph.generated.nodes.Method => m.filename
@@ -25,6 +25,12 @@
         c.method.filename.headOption.getOrElse("")
       case cs: io.shiftleft.codepropertygraph.generated.nodes.ControlStructure => 
         cs.method.filename.headOption.getOrElse("")
+      case mp: io.shiftleft.codepropertygraph.generated.nodes.MethodParameterIn =>
+        mp.method.filename.headOption.getOrElse("")
+      case l: io.shiftleft.codepropertygraph.generated.nodes.Local =>
+        l.method.filename.headOption.getOrElse("")
+      case i: io.shiftleft.codepropertygraph.generated.nodes.Identifier =>
+        i.method.filename.headOption.getOrElse("")
       case _ => ""
     }
     val filename = filenameAny.toString
@@ -33,6 +39,9 @@
       case m: io.shiftleft.codepropertygraph.generated.nodes.Method => m.lineNumber.getOrElse(-1)
       case c: io.shiftleft.codepropertygraph.generated.nodes.Call => c.lineNumber.getOrElse(-1)
       case cs: io.shiftleft.codepropertygraph.generated.nodes.ControlStructure => cs.lineNumber.getOrElse(-1)
+      case mp: io.shiftleft.codepropertygraph.generated.nodes.MethodParameterIn => mp.lineNumber.getOrElse(-1)
+      case l: io.shiftleft.codepropertygraph.generated.nodes.Local => l.lineNumber.getOrElse(-1)
+      case i: io.shiftleft.codepropertygraph.generated.nodes.Identifier => i.lineNumber.getOrElse(-1)
       case _ => -1
     }
 
@@ -45,6 +54,9 @@
       case m: io.shiftleft.codepropertygraph.generated.nodes.Method => m.name
       case c: io.shiftleft.codepropertygraph.generated.nodes.Call => c.name
       case cs: io.shiftleft.codepropertygraph.generated.nodes.ControlStructure => cs.controlStructureType
+      case mp: io.shiftleft.codepropertygraph.generated.nodes.MethodParameterIn => mp.name
+      case l: io.shiftleft.codepropertygraph.generated.nodes.Local => l.name
+      case i: io.shiftleft.codepropertygraph.generated.nodes.Identifier => i.name
       case _ => ""
     }
 
@@ -52,6 +64,9 @@
       case m: io.shiftleft.codepropertygraph.generated.nodes.Method => m.code
       case c: io.shiftleft.codepropertygraph.generated.nodes.Call => c.code
       case cs: io.shiftleft.codepropertygraph.generated.nodes.ControlStructure => cs.code
+      case mp: io.shiftleft.codepropertygraph.generated.nodes.MethodParameterIn => mp.code
+      case l: io.shiftleft.codepropertygraph.generated.nodes.Local => l.code
+      case i: io.shiftleft.codepropertygraph.generated.nodes.Identifier => i.code
       case _ => ""
     }
 
@@ -66,10 +81,9 @@
     "}"
   }
 
-  // Export CALL, CFG, and REACHING_DEF (PDG) edges
-  // In Joern 4.0.x (flatgraph), we use .allEdges to iterate
+  // Export ALL relevant edges for data-flow tracking
   val edgesList = cpg.graph.allEdges.filter(e => 
-    Set("CALL", "CFG", "REACHING_DEF", "REF").contains(e.label)
+    Set("CALL", "CFG", "REACHING_DEF", "REF", "AST", "PARAMETER_LINK").contains(e.label)
   ).map { e =>
     "{" +
       "\"src\":\"" + e.src.id().toString + "\"," +

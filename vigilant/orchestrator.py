@@ -76,7 +76,7 @@ def node_ingest(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
-    """Plane II — Taint tracking + concolic analysis."""
+    """Plane II — Taint tracking + concolic analysis + Deep Scan fallback."""
     agent = AgentState(**state)
     ctx = agent.pr_context
     repo_path = Path(ctx.repo_path) if ctx else None
@@ -85,12 +85,33 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
         logger.info("[Analysis] Running taint tracker")
         code_law = CodeLaw(repo_path=repo_path)
         tracker = TaintTracker(code_law=code_law)
-        paths = tracker.find_taint_paths()
+        paths = tracker.find_taint_paths(pr_intent=agent.pr_intent)
         logger.info("[Analysis] Found %d taint paths", len(paths))
 
         logger.info("[Analysis] Running concolic engine")
         engine = ConcolicEngine()
         vulns = engine.analyze(paths)
+
+        # ── Deep Scan Fallback ────────────────────────────────────────────────
+        # If no vulnerabilities found, or for files matching specific rules,
+        # perform a direct LLM-powered review of the file content.
+        if ctx:
+            files_to_scan = ctx.changed_files if ctx.changed_files else [str(f.relative_to(repo_path)) for f in repo_path.glob("**/*") if f.is_file() and f.suffix in (".cpp", ".cc", ".c", ".h", ".hpp")]
+            logger.info("[Analysis] Files for Deep Scan: %s", files_to_scan)
+            
+            for f_rel in files_to_scan:
+                f_path = repo_path / f_rel
+                if not f_path.exists():
+                    logger.warning("[Analysis] Deep Scan: file not found %s", f_path)
+                    continue
+                
+                matching_rules = code_law.rules_for_file(f_rel)
+                logger.info("[Analysis] File: %s | Matching Rules: %d", f_rel, len(matching_rules))
+                if matching_rules:
+                    deep_findings = engine.deep_scan(f_path, matching_rules)
+                    logger.info("[Analysis] Deep Scan found %d findings for %s", len(deep_findings), f_rel)
+                    vulns.extend(deep_findings)
+
         agent.taint_paths = paths
         agent.vulnerabilities = vulns
 
@@ -117,6 +138,8 @@ def node_validate(state: dict[str, Any]) -> dict[str, Any]:
     poc_gen = PoCGenerator(repo_path=repo_path)
     sandbox = SandboxRunner(repo_path=repo_path)
 
+    settings = get_settings()
+
     for vuln in agent.vulnerabilities:
         # Skip ADVISORY — no PoC or sandbox needed
         if vuln.status == VulnerabilityStatus.ADVISORY:
@@ -127,15 +150,25 @@ def node_validate(state: dict[str, Any]) -> dict[str, Any]:
             poc = poc_gen.generate(vuln)
             agent.poc_files[vuln.vuln_id] = poc
 
-            if not agent.dry_run:
+            if not agent.dry_run or settings.sandbox_always_run:
                 logger.info("[Validation] Running sandbox for %s", vuln.vuln_id[:8])
                 result = sandbox.run(vuln, poc)
                 agent.sandbox_results[vuln.vuln_id] = result
 
-                # Upgrade status if sandbox confirmed a crash
+                # ── Sandbox Tie-Breaker ───────────────────────────────────────
+                # If sandbox confirmed a crash, upgrade status
                 if not result.passed and not result.compilation_error:
                     vuln.status = VulnerabilityStatus.SANDBOX_VERIFIED
                     logger.info("[Validation] Sandbox CRASH confirmed: %s", result.crash_type)
+                elif result.passed:
+                    # If sandbox passed (no crash), it's a False Positive or unexploitable
+                    # Downgrade from PROVEN/FUZZ_VERIFIED to WARNING
+                    old_status = vuln.status
+                    vuln.status = VulnerabilityStatus.WARNING
+                    logger.info(
+                        "[Validation] Sandbox PASSED (no crash). Downgrading %s: %s → WARNING",
+                        vuln.vuln_id[:8], old_status
+                    )
                 elif result.compilation_error:
                     logger.warning("[Validation] Sandbox compile error for %s", vuln.vuln_id[:8])
             else:

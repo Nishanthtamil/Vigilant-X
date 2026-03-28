@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     github_repo: str = ""
 
     # ── Sandbox ───────────────────────────────────────────────────────────────
+    sandbox_always_run: bool = False
     sandbox_timeout_seconds: int = 120
     libfuzzer_timeout_seconds: int = 60
     z3_memory_limit_mb: int = 2048
@@ -177,11 +178,12 @@ class CodeLaw:
 
     def rules_for_file(self, file_path: str) -> list[CodeLawRule]:
         """Return rules whose glob patterns match the given file path."""
-        import fnmatch
         matching = []
+        p = Path(file_path)
         for rule in self.rules:
             for pattern in rule.applies_to:
-                if fnmatch.fnmatch(file_path, pattern):
+                # Match recursive (**/) or direct (*.cpp)
+                if p.match(pattern) or p.match(pattern.replace("**/", "")):
                     matching.append(rule)
                     break
         return matching
@@ -223,6 +225,7 @@ class BuildInference:
         self.has_project_dockerfile: bool = (repo_path / "Dockerfile").exists()
         self.compiler: str = self._detect_compiler()
         self.is_clang: bool = "clang" in self.compiler.lower()
+        self.compile_commands: list[dict] | None = self._load_compile_commands()
 
     def _detect(self) -> BuildSystem:
         for build_system, files in self.INDICATORS:
@@ -230,6 +233,42 @@ class BuildInference:
                 if (self.repo_path / filename).exists():
                     return build_system
         return BuildSystem.UNKNOWN
+
+    def _load_compile_commands(self) -> list[dict] | None:
+        import json
+        for path in ["compile_commands.json", "build/compile_commands.json"]:
+            cc_path = self.repo_path / path
+            if cc_path.exists():
+                try:
+                    return json.loads(cc_path.read_text())
+                except Exception:
+                    pass
+        return None
+
+    def get_file_metadata(self, file_path: str) -> dict[str, str]:
+        """Extract exact compiler and optimization flags for a specific file."""
+        if not self.compile_commands:
+            return {"compiler": self.compiler, "opt_level": "-O1", "flags": []}
+            
+        for cmd in self.compile_commands:
+            if file_path in cmd.get("file", "") or file_path in cmd.get("command", ""):
+                full_cmd = cmd.get("command", "")
+                parts = full_cmd.split()
+                compiler = parts[0]
+                flags = [p for p in parts[1:] if p.startswith("-")]
+                
+                # Extract optimization level
+                opt_level = "-O1"
+                for f in flags:
+                    if f in ("-O0", "-O1", "-O2", "-O3", "-Os", "-Oz"):
+                        opt_level = f
+                
+                return {
+                    "compiler": compiler,
+                    "opt_level": opt_level,
+                    "flags": flags
+                }
+        return {"compiler": self.compiler, "opt_level": "-O1", "flags": []}
 
     def _detect_compiler(self) -> str:
         """Check CMake cache or environment for the active compiler."""

@@ -154,7 +154,8 @@ Mocking include: {self.mock_fw.include_directive}
 Write a single-file GoogleTest repro that:
 1. Includes <gtest/gtest.h> and the mocking include above.
 2. Calls {path.sink.function_name}() directly or through the call chain with the witness values.
-3. The test should be named: TEST(VigilantX, {path.sink.function_name.capitalize()}Overflow)
+3. **EXPLOIT TRIGGER**: If this is a buffer overflow, use a string much larger than the target buffer (e.g. 256 bytes of 'A'). If it is a Use-After-Free, ensure you allocate other memory after the free to corrupt the heap before access.
+4. The test should be named: TEST(VigilantX, {path.sink.function_name.capitalize()}Overflow)
 4. Add a comment suggesting the C++20/23 fix.
 """
 

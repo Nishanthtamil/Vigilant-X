@@ -61,7 +61,56 @@ class IntentParser:
             max_tokens=1024,
         )
 
-        return self._parse_response(raw)
+        intent = self._parse_response(raw)
+        
+        # ── Autonomous API Surface Discovery (Personality Scan) ───────────────
+        if pr_context.repo_path:
+            repo_path = Path(pr_context.repo_path)
+            # 1. Global Scan: identify core library types and interaction patterns
+            # 2. Changed File Scan: specific new sinks/sources
+            for f_rel in pr_context.changed_files[:10]: # Expanded to 10 files
+                f_path = repo_path / f_rel
+                if f_path.exists() and f_path.suffix in (".h", ".hpp", ".cpp"):
+                    sources, sinks = self.detect_api_surface(f_path)
+                    intent.dynamic_sources.extend(sources)
+                    intent.dynamic_sinks.extend(sinks)
+            
+            # Global Discovery: Sample 5 random header files to identify project 'personality'
+            headers = list(repo_path.rglob("*.h")) + list(repo_path.rglob("*.hpp"))
+            import random
+            for h_path in random.sample(headers, min(len(headers), 5)):
+                sources, sinks = self.detect_api_surface(h_path)
+                intent.dynamic_sources.extend(sources)
+                intent.dynamic_sinks.extend(sinks)
+
+            # Deduplicate
+            intent.dynamic_sources = list(set(intent.dynamic_sources))
+            intent.dynamic_sinks = list(set(intent.dynamic_sinks))
+            if intent.dynamic_sources or intent.dynamic_sinks:
+                logger.info("IntentParser: discovered %d unique dynamic sources/sinks", 
+                            len(intent.dynamic_sources) + len(intent.dynamic_sinks))
+
+        return intent
+
+    def detect_api_surface(self, file_path: Path) -> tuple[list[str], list[str]]:
+        """Use LLM to identify potential security-sensitive functions in a file."""
+        try:
+            content = file_path.read_text(errors="replace")[:4000] # First 4k chars
+            prompt = (
+                f"You are analyzing a C++ project to identify 'Semantic Sinks' and 'Sources'.\n"
+                f"Sources: Functions that read untrusted data (e.g., from network, files, user input).\n"
+                f"Sinks: Functions that perform logical dangerous operations (e.g., memory writes, custom buffer copies, execution, state mutation), regardless of their name (e.g., a custom `Buffer::writeData` or `SmartPtr::reset`).\n\n"
+                f"Return ONLY a JSON object: {{\"sources\": [\"func1\", \"func2\"], \"sinks\": [\"func3\"]}}\n\n"
+                f"CODE:\n{content}"
+            )
+            raw = self.llm.ask("You are a C++ security expert.", prompt, temperature=0.0, max_tokens=512)
+            import json
+            raw = re.sub(r"```(?:json)?", "", raw).strip().strip("`")
+            data = json.loads(raw)
+            return data.get("sources", []), data.get("sinks", [])
+        except Exception as e:
+            logger.debug("IntentParser: API surface detection failed for %s: %s", file_path.name, e)
+            return [], []
 
     def _build_prompt(self, pr_context: PRContext, readme_path: Path | None) -> str:
         parts = [
