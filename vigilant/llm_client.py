@@ -104,16 +104,48 @@ class LLMClient:
         # Try OpenAI if not already used
         if self.provider != LLMProvider.OPENAI and self.settings.openai_api_key:
             logger.info("LLMClient: Falling back to OpenAI")
-            self.provider = LLMProvider.OPENAI
-            self._init_openai()
-            return self._chat_openai(messages, temperature, max_tokens)
+            # Use a one-off client to avoid mutating self
+            try:
+                from openai import OpenAI
+                temp_client = OpenAI(api_key=self.settings.openai_api_key)
+                response = temp_client.chat.completions.create(
+                    model=self.settings.openai_model,
+                    messages=messages,  # type: ignore[arg-type]
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                return response.choices[0].message.content or ""
+            except Exception as e:
+                logger.error("LLMClient: OpenAI fallback failed: %s", e)
         
         # Try Anthropic
         if self.provider != LLMProvider.ANTHROPIC and self.settings.anthropic_api_key:
             logger.info("LLMClient: Falling back to Anthropic")
-            self.provider = LLMProvider.ANTHROPIC
-            self._init_anthropic()
-            return self._chat_anthropic(messages, temperature, max_tokens)
+            try:
+                from anthropic import Anthropic
+                temp_client = Anthropic(api_key=self.settings.anthropic_api_key)
+                
+                system_content = ""
+                user_messages = []
+                for msg in messages:
+                    if msg["role"] == "system":
+                        system_content += msg["content"] + "\n"
+                    else:
+                        user_messages.append(msg)
+
+                kwargs: dict[str, Any] = {
+                    "model": self.settings.anthropic_model,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "messages": user_messages,
+                }
+                if system_content:
+                    kwargs["system"] = system_content.strip()
+
+                response = temp_client.messages.create(**kwargs)
+                return response.content[0].text if response.content else ""
+            except Exception as e:
+                logger.error("LLMClient: Anthropic fallback failed: %s", e)
             
         raise RuntimeError("LLMClient: All fallback providers failed or were not configured.")
 

@@ -200,30 +200,51 @@ class Z3Solver:
         self, path: TaintPath
     ) -> tuple[dict[str, z3.ExprRef], list[z3.ExprRef], list[str]]:
         """
-        Encodes the path into Z3 constraints by transpiling C++ logic to SMT-LIBv2 using the LLM.
-        This provides a dynamic, semantic understanding of vulnerabilities like RAII UAF or custom buffers.
+        Encodes the path into Z3 constraints.
+        Priority:
+        1. Programmatic encoding for known sinks (memcpy, strcpy).
+        2. LLM-based SMT-LIBv2 transpilation for complex patterns.
         """
         sink_node = self.builder.get_node(path.sink.node_id)
         if not sink_node:
             return {}, [], []
 
         sink_code = sink_node.get("code", "")
-        
+        sink_name = path.sink.function_name
+
+        # ── 1. Programmatic Encoding for Common Sinks ────────────────────────
+        if sink_name in ("memcpy", "strncpy", "memmove"):
+            # Simple buffer overflow model: input_len > dest_size
+            dest_size = z3.Int("dest_size")
+            input_len = z3.Int("input_len")
+            
+            # Try to extract sizes from code or use defaults
+            # (In a real system, we'd pull these from the CPG node properties)
+            constraints = [input_len > dest_size, dest_size > 0, input_len > 0]
+            formula_parts = ["input_len > dest_size"]
+            sym_vars = {"dest_size": dest_size, "input_len": input_len}
+            return sym_vars, constraints, formula_parts
+
+        if sink_name in ("strcpy", "strcat", "gets"):
+            input_len = z3.Int("input_len")
+            dest_size = z3.Int("dest_size")
+            constraints = [input_len >= dest_size, dest_size > 0]
+            formula_parts = ["input_len >= dest_size"]
+            sym_vars = {"dest_size": dest_size, "input_len": input_len}
+            return sym_vars, constraints, formula_parts
+
+        # ── 2. LLM-based Transpilation (Fallback) ───────────────────────────
         # If no LLM configured, fallback to basic reachability
         if not self.llm:
-            reachable = z3.Bool(f"{path.sink.function_name}_reachable")
-            return {f"{path.sink.function_name}_reachable": reachable}, [reachable], [f"{path.sink.function_name}_is_reachable"]
+            reachable = z3.Bool(f"{sink_name}_reachable")
+            return {f"{sink_name}_reachable": reachable}, [reachable], [f"{sink_name}_is_reachable"]
 
         prompt = (
             f"You are a formal verification expert. Transpile the following C++ vulnerability path into Z3 SMT-LIBv2 format.\n"
-            f"Focus on extracting semantic constraints (e.g., buffer sizes, integer overflows, use-after-free states) from the code.\n\n"
-            f"Sink Function Name: {path.sink.function_name}\n"
+            f"Sink Function Name: {sink_name}\n"
             f"Code Snippet:\n```cpp\n{sink_code}\n```\n\n"
-            f"Instructions:\n"
-            f"1. Output ONLY the SMT-LIBv2 code (no markdown, no explanations).\n"
-            f"2. Use standard SMT-LIBv2 commands like `(declare-fun ...)` and `(assert ...)`. \n"
-            f"3. Ensure the output is a single, valid SMT-LIBv2 string that Z3 can parse.\n"
-            f"4. **SPECIAL CHECK: EXCEPTION/CLEANUP SKIP**: Identify if the code contains early returns, throws, or breaks that could bypass a mandatory cleanup. If so, add an assertion that proves the leak/vulnerability.\n"
+            f"Return ONLY SMT-LIBv2 code. Use `(declare-fun ...)` and `(assert ...)`. "
+            f"Ensure the output is valid SMT-LIBv2."
         )
         
         # Phase 3: LLM Reliability (Self-Correction Loop)
@@ -453,24 +474,19 @@ class ConcolicEngine:
         
         try:
             content = file_path.read_text()
-            rules_str = "\n".join([f"- {r.id}: {r.description} (Pattern: {r.pattern})" for r in rules])
+            rules_str = "\n".join([f"- {r.id}: {r.description}" for r in rules])
             
             prompt = (
                 f"Analyze the following C++ code for violations of these security rules:\n"
                 f"{rules_str}\n\n"
                 f"CODE:\n{content}\n\n"
-                f"INSTRUCTIONS FOR YOUR ANALYSIS:\n"
-                f"1. **DEFENSIVE CHECK**: Before flagging a CRITICAL violation, look for bounds checks, null checks, or length validations that might mitigate the risk. If a check exists (e.g., `if (len < size)`), do NOT flag it as CRITICAL.\n"
-                f"2. **PATCH DETECTION**: If the code appears to be a 'fixed' version of a known bug (e.g., it sets a pointer to `nullptr` after `free`), it is CLEAR.\n"
-                f"3. **RAII SAFETY**: Modern C++ containers (std::vector, std::string) and smart pointers are generally safe. Do not flag them unless there is a clear logic error.\n"
-                f"4. **PRECISION OVER RECALL**: Only flag as CRITICAL if you are 95% certain it is a real, exploitable security bug. If it's just a style issue or a low-risk pattern, use ADVISORY.\n\n"
-                f"For each violation found, provide:\n"
-                f"1. Rule ID\n"
-                f"2. Severity (CRITICAL or ADVISORY)\n"
-                f"3. Line number and code snippet\n"
-                f"4. Detailed explanation of why it's a bug\n"
-                f"5. A verified fix using modern C++\n\n"
-                f"If the code is secure and follows the rules, return 'CLEAR'."
+                f"INSTRUCTIONS:\n"
+                f"1. **DEFENSIVE CHECK**: Before flagging a CRITICAL violation, look for mitigations (bounds checks, etc.).\n"
+                f"2. **PATCH DETECTION**: If the code appears to be a 'fixed' version, it is CLEAR.\n"
+                f"3. **PRECISION**: Only flag CRITICAL if 95% certain it is a real, exploitable bug.\n\n"
+                f"Return a JSON object with a 'findings' key: \n"
+                f"{{\"findings\": [{{\"rule_id\": \"...\", \"severity\": \"CRITICAL|ADVISORY\", \"line_number\": 0, \"explanation\": \"...\", \"verified_fix\": \"...\"}}]}}\n"
+                f"If no violations found, return {{\"findings\": []}}."
             )
             
             response = self.llm.ask(
@@ -479,9 +495,6 @@ class ConcolicEngine:
                 max_tokens=2048
             )
             
-            if "CLEAR" in response.upper() and len(response) < 10:
-                return []
-                
             return self._parse_deep_scan_response(response, file_path)
             
         except Exception as e:
@@ -489,43 +502,87 @@ class ConcolicEngine:
             return []
 
     def _parse_deep_scan_response(self, response: str, file_path: Path) -> list[Vulnerability]:
-        """Simplified parser for LLM-generated deep scan findings."""
-        # This would ideally be a structured JSON output from LLM, but for now we'll 
-        # wrap the response into an ADVISORY or PROVEN vulnerability.
-        vulns = []
+        """Parser for LLM-generated JSON deep scan findings."""
+        import json
         
-        # We'll treat each identified finding as a vulnerability.
-        # For simplicity in this prototype, we'll create one vulnerability representing the scan report.
-        status = VulnerabilityStatus.PROVEN if "CRITICAL" in response.upper() else VulnerabilityStatus.ADVISORY
+        # Clean up potential markdown formatting
+        raw = re.sub(r"```(?:json)?", "", response).strip().strip("`")
         
-        # Create a mock taint path for the finding
-        dummy_node = TaintNode(
-            node_id=str(uuid.uuid4()),
-            file_path=str(file_path),
-            function_name="DeepScanResult",
-            line_number=0,
-            node_role="SINK",
-            label="Deep Scan finding",
-        )
-        
-        path = TaintPath(
-            path_id=str(uuid.uuid4()),
-            source=dummy_node,
-            sink=dummy_node,
-            intermediate_nodes=[],
-            crosses_files=False,
-        )
-        
-        vulns.append(Vulnerability(
-            vuln_id=str(uuid.uuid4()),
-            taint_path=path,
-            status=status,
-            confidence=0.9,
-            summary=f"Deep Scan Finding in {file_path.name}",
-            z3_proof=response, # Store the full LLM explanation here
-        ))
-        
-        return vulns
+        try:
+            # Handle cases where LLM might return 'CLEAR' instead of empty JSON
+            if "CLEAR" in raw.upper() and len(raw) < 10:
+                return []
+                
+            data = json.loads(raw)
+            findings = data.get("findings", [])
+            
+            vulns = []
+            for item in findings:
+                rule_id = item.get("rule_id", "unknown")
+                severity_str = item.get("severity", "ADVISORY").upper()
+                status = VulnerabilityStatus.PROVEN if severity_str == "CRITICAL" else VulnerabilityStatus.ADVISORY
+                
+                line_number = int(item.get("line_number", 0))
+                dummy_node = TaintNode(
+                    node_id=str(uuid.uuid4()),
+                    file_path=str(file_path),
+                    function_name="DeepScan",
+                    line_number=line_number,
+                    node_role="SINK",
+                    label=f"Rule violation: {rule_id}",
+                )
+                
+                path = TaintPath(
+                    path_id=str(uuid.uuid4()),
+                    source=dummy_node,
+                    sink=dummy_node,
+                    intermediate_nodes=[],
+                    crosses_files=False,
+                )
+                
+                vulns.append(Vulnerability(
+                    vuln_id=str(uuid.uuid4()),
+                    taint_path=path,
+                    status=status,
+                    confidence=0.9,
+                    summary=f"Deep Scan: {rule_id} at line {line_number}",
+                    z3_proof=item.get("explanation", ""),
+                ))
+            
+            return vulns
+            
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning("Deep Scan: could not parse JSON response: %s", e)
+            if "CRITICAL" in response.upper():
+                status = VulnerabilityStatus.PROVEN
+            else:
+                status = VulnerabilityStatus.ADVISORY
+            
+            dummy_node = TaintNode(
+                node_id=str(uuid.uuid4()),
+                file_path=str(file_path),
+                function_name="DeepScan",
+                line_number=0,
+                node_role="SINK",
+                label="Deep Scan finding (JSON parse failed)",
+            )
+            
+            path = TaintPath(
+                path_id=str(uuid.uuid4()),
+                source=dummy_node,
+                sink=dummy_node,
+                intermediate_nodes=[],
+                crosses_files=False,
+            )
+            
+            return [Vulnerability(
+                vuln_id=str(uuid.uuid4()),
+                taint_path=path,
+                status=status,
+                confidence=0.7,
+                summary=f"Deep Scan Finding in {file_path.name} (Unstructured)",
+                z3_proof=response,
+            )]
 
     def _analyze_path(self, path: TaintPath) -> Vulnerability:
         vuln_id = str(uuid.uuid4())

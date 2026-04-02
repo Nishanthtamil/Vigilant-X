@@ -182,17 +182,26 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
     func_name_to_id: dict[str, str] = {}
 
     # Pass 1: find all functions
+    # Improved regex to handle templates and some multiline signatures
+    FUNC_RE = re.compile(
+        r"(?:template\s*<[^>]+>\s*)?"  # Optional template
+        r"(?:\w[\w\s\*&<>]+\s+)"       # Return type
+        r"(?P<name>\w+)"               # Function name
+        r"\s*\([^)]*\)"                # Arguments (simplified)
+        r"(?:\s*const)?(?:\s*override)?(?:\s*noexcept)?" # Qualifiers
+        r"\s*\{",                      # Opening brace
+        re.MULTILINE
+    )
+
     for fpath in target_files:
         p = Path(fpath)
         if not p.exists(): continue
         src_text = p.read_text(errors="replace")
 
-        for match in re.finditer(
-            r"(?P<ret>\w[\w\s\*&]+)\s+(?P<name>\w+)\s*\((?P<args>[^)]*)\)\s*\{",
-            src_text,
-        ):
+        for match in FUNC_RE.finditer(src_text):
             line_start = src_text[: match.start()].count("\n") + 1
-            body_text = src_text[match.start():]
+            body_start = match.end() - 1
+            body_text = src_text[body_start:]
             depth, end_idx = 0, len(body_text) - 1
             for i, ch in enumerate(body_text):
                 if ch == "{": depth += 1
@@ -214,7 +223,7 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
                 "line_start": line_start,
                 "line_end": line_end,
                 "node_type": "AST_FUNC",
-                "code": body[:800],
+                "code": (match.group(0) + body)[:2000], # Include signature + body
             })
 
     # Pass 2: find sources, sinks, and internal calls
@@ -223,15 +232,13 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
         if not p.exists(): continue
         src_text = p.read_text(errors="replace")
 
-        for match in re.finditer(
-            r"(?P<ret>\w[\w\s\*&]+)\s+(?P<name>\w+)\s*\((?P<args>[^)]*)\)\s*\{",
-            src_text,
-        ):
+        for match in FUNC_RE.finditer(src_text):
             fname = match.group("name")
             func_id = func_name_to_id.get(fname)
             if not func_id: continue
 
-            body_text = src_text[match.start():]
+            body_start = match.end() - 1
+            body_text = src_text[body_start:]
             depth, end_idx = 0, len(body_text) - 1
             for i, ch in enumerate(body_text):
                 if ch == "{": depth += 1
@@ -552,6 +559,11 @@ class CPGBuilder:
                     function_name=n["function_name"],
                     line_start=n.get("line_start", 0),
                     line_end=n.get("line_end", 0),
+                    node_type=n.get("node_type", "AST_FUNC"),
+                    content_hash=n.get("content_hash", ""),
+                ))
+            return nodes
+   line_end=n.get("line_end", 0),
                     node_type=n.get("node_type", "AST_FUNC"),
                     content_hash=n.get("content_hash", ""),
                 ))

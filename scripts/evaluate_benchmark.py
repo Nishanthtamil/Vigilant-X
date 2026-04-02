@@ -13,7 +13,8 @@ from vigilant.orchestrator import run_review
 from vigilant.models import VulnerabilityStatus
 from vigilant.ingestion.cpg_builder import get_driver
 
-BENCHMARK_REPO = Path("/home/nishanth/Vigilant-X/benchmarks/mock_repo")
+ROOT_DIR = Path(__file__).parent.parent
+BENCHMARK_REPO = ROOT_DIR / "benchmarks" / "mock_repo"
 BENCHMARK_CODE_LAW = BENCHMARK_REPO / "code_law"
 
 CASES = {
@@ -199,8 +200,9 @@ def setup_benchmark_repo():
     BENCHMARK_REPO.mkdir(parents=True)
     
     # Copy code_law so it finds the rules
-    if not BENCHMARK_CODE_LAW.exists():
-        shutil.copytree("/home/nishanth/Vigilant-X/code_law", BENCHMARK_CODE_LAW)
+    source_code_law = ROOT_DIR / "code_law"
+    if source_code_law.exists():
+        shutil.copytree(source_code_law, BENCHMARK_CODE_LAW)
 
 def run_benchmarks():
     setup_benchmark_repo()

@@ -96,10 +96,18 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
         # If no vulnerabilities found, or for files matching specific rules,
         # perform a direct LLM-powered review of the file content.
         if ctx:
+            # Identify files that ALREADY have vulnerabilities from taint tracking
+            files_with_vulns = {v.taint_path.sink.file_path for v in vulns}
+            
             files_to_scan = ctx.changed_files if ctx.changed_files else [str(f.relative_to(repo_path)) for f in repo_path.glob("**/*") if f.is_file() and f.suffix in (".cpp", ".cc", ".c", ".h", ".hpp")]
             logger.info("[Analysis] Files for Deep Scan: %s", files_to_scan)
             
             for f_rel in files_to_scan:
+                # SKIP Deep Scan if we already found a vulnerability in this file via taint tracking
+                if f_rel in files_with_vulns:
+                    logger.info("[Analysis] Skipping Deep Scan for %s (already has findings)", f_rel)
+                    continue
+
                 f_path = repo_path / f_rel
                 if not f_path.exists():
                     logger.warning("[Analysis] Deep Scan: file not found %s", f_path)
@@ -277,5 +285,9 @@ def run_review(
     ).model_dump()
 
     graph = build_graph()
-    final = graph.invoke(initial_state)
-    return AgentState(**final)
+    try:
+        final = graph.invoke(initial_state)
+        return AgentState(**final)
+    finally:
+        from vigilant.ingestion.cpg_builder import close_driver
+        close_driver()

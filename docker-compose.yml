@@ -40,8 +40,6 @@ services:
     volumes:
       # Source code mount for analysis (read-only)
       - ./:/app:ro
-      # Docker socket so orchestrator can spawn sandbox containers
-      - /var/run/docker.sock:/var/run/docker.sock
     command: [ "python", "-m", "vigilant.cli", "--help" ]
 
   # ── Pre-build sandbox image (useful to cache the heavy LLVM layer) ────────────

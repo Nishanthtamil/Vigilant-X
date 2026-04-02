@@ -101,6 +101,10 @@ class SandboxRunner:
                     file_meta.get("flags", []), opt_level, compiler_override
                 )
                 
+                # Determine if this is an override compared to project defaults
+                project_compiler = compiler_info.get("compiler", "g++")
+                is_override = (compiler_override != project_compiler)
+
                 # Use relative paths for the container: working_dir is /workspace/build
                 container_src = poc.file_name
                 container_bin = "./repro"
@@ -112,7 +116,7 @@ class SandboxRunner:
                     tmp_path,
                     compile_cmd=full_cmd,
                     run_cmd=run_cmd,
-                    compiler_override=True, 
+                    compiler_override=is_override, 
                 )
                 
                 if not current_result.passed:

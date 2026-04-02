@@ -75,10 +75,10 @@ class IntentParser:
                     intent.dynamic_sources.extend(sources)
                     intent.dynamic_sinks.extend(sinks)
             
-            # Global Discovery: Sample 5 random header files to identify project 'personality'
-            headers = list(repo_path.rglob("*.h")) + list(repo_path.rglob("*.hpp"))
-            import random
-            for h_path in random.sample(headers, min(len(headers), 5)):
+            # Global Discovery: Sample 5 header files to identify project 'personality'
+            # Sort for determinism
+            headers = sorted(list(repo_path.rglob("*.h")) + list(repo_path.rglob("*.hpp")))
+            for h_path in headers[:5]:
                 sources, sinks = self.detect_api_surface(h_path)
                 intent.dynamic_sources.extend(sources)
                 intent.dynamic_sinks.extend(sinks)
