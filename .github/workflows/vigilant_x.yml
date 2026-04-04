@@ -15,11 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    env:
+      NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD || 'vigilant_local' }}
+
     services:
       neo4j:
         image: neo4j:5.19-community
         env:
-          NEO4J_AUTH: neo4j/vigilant_local
+          NEO4J_AUTH: neo4j/${{ secrets.NEO4J_PASSWORD || 'vigilant_local' }}
           NEO4J_PLUGINS: '["apoc"]'
           NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
           NEO4J_server_memory_heap_max__size: "512M"
@@ -48,8 +51,8 @@ jobs:
       - name: Install Vigilant-X
         run: pip install -e ".[dev]"
 
-      - name: Pull/Build sandbox image
-        run: docker pull ubuntu:24.04  # base layer cache warm-up
+      - name: Build sandbox image
+        run: docker build --target sandbox -t vigilant-x-sandbox:latest .
 
       - name: Run Vigilant-X
         env:
@@ -61,7 +64,7 @@ jobs:
           USE_LOCAL_NEO4J: "true"
           NEO4J_LOCAL_URI: bolt://localhost:7687
           NEO4J_LOCAL_USERNAME: neo4j
-          NEO4J_LOCAL_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          NEO4J_LOCAL_PASSWORD: ${{ env.NEO4J_PASSWORD }}
           SANDBOX_IMAGE: vigilant-x-sandbox:latest
           Z3_MEMORY_LIMIT_MB: "2048"
           PR_NUMBER: ${{ github.event.pull_request.number }}

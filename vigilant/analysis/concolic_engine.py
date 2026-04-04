@@ -158,11 +158,11 @@ class Z3Solver:
     Memory-limited via z3.set_param to prevent OOM in containerised environments.
     """
 
-    def __init__(self, memory_limit_mb: int | None = None, llm: LLMClient | None = None) -> None:
+    def __init__(self, memory_limit_mb: int | None = None, llm: LLMClient | None = None, builder: CPGBuilder | None = None) -> None:
         settings = get_settings()
         limit = memory_limit_mb or settings.z3_memory_limit_mb
         z3.set_param("memory_max_size", limit)
-        self.builder = CPGBuilder()
+        self.builder = builder or CPGBuilder()
         self.llm = llm
         logger.debug("Z3Solver: memory limit = %d MB", limit)
 
@@ -472,8 +472,9 @@ class ConcolicEngine:
 
     def __init__(self, llm: LLMClient | None = None) -> None:
         self.llm = llm or LLMClient()
+        self.builder = CPGBuilder()
         self.pruner = HeuristicPathPruner(llm=self.llm)
-        self.z3_solver = Z3Solver(llm=self.llm)
+        self.z3_solver = Z3Solver(llm=self.llm, builder=self.builder)
         self.fuzzer = LibFuzzerRunner()
 
     def analyze(self, paths: list[TaintPath], time_limit_seconds: int = 300) -> list[Vulnerability]:
@@ -496,8 +497,8 @@ class ConcolicEngine:
         ]
 
         def _solve(p: TaintPath) -> Vulnerability:
-            # Each thread owns its Z3Solver — no shared state
-            solver = Z3Solver(llm=self.llm)
+            # Each thread owns its Z3Solver, but they share the CPGBuilder to avoid redundant schema checks
+            solver = Z3Solver(llm=self.llm, builder=self.builder)
             return self._analyze_path_with_solver(p, solver)
 
         budget = time_limit_seconds - (time.time() - start)

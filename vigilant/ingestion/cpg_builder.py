@@ -64,6 +64,8 @@ def close_driver() -> None:
 # Schema setup
 # ─────────────────────────────────────────────────────────────────────────────
 
+_schema_initialized = False
+
 _SETUP_QUERIES = [
     # Constraints
     "CREATE CONSTRAINT cpg_node_unique IF NOT EXISTS FOR (n:CPGNode) REQUIRE n.node_id IS UNIQUE",
@@ -75,12 +77,17 @@ _SETUP_QUERIES = [
 
 def ensure_schema(driver: Driver) -> None:
     """Create Neo4j schema constraints and indexes if they don't exist."""
+    global _schema_initialized
+    if _schema_initialized:
+        return
+
     with driver.session() as session:
         for query in _SETUP_QUERIES:
             try:
                 session.run(query)
             except Exception as e:
                 logger.debug("Schema setup skipped (may already exist): %s", e)
+    _schema_initialized = True
     logger.info("Neo4j schema ready.")
 
 

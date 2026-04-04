@@ -10,7 +10,15 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
+
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception,
+)
 
 from vigilant.config import LLMProvider, get_settings
 
@@ -81,6 +89,12 @@ class LLMClient:
 
     # ── Public interface ──────────────────────────────────────────────────────
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=10),
+        retry=retry_if_exception(lambda e: "rate_limit_exceeded" in str(e).lower() or "429" in str(e)),
+        reraise=True,
+    )
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -92,17 +106,17 @@ class LLMClient:
             if self.provider == LLMProvider.GROQ:
                 return self._chat_groq(messages, temperature, max_tokens, json_mode)
             elif self.provider == LLMProvider.OPENAI:
-                return self._chat_openai(messages, temperature, max_tokens)
+                return self._chat_openai(messages, temperature, max_tokens, json_mode)
             elif self.provider == LLMProvider.ANTHROPIC:
-                return self._chat_anthropic(messages, temperature, max_tokens)
+                return self._chat_anthropic(messages, temperature, max_tokens, json_mode)
         except Exception as e:
             if "rate_limit_exceeded" in str(e).lower() or "429" in str(e):
-                logger.warning("LLMClient: Rate limit exceeded for %s. Attempting fallback.", self.provider)
-                return self._fallback_chat(messages, temperature, max_tokens)
+                logger.warning("LLMClient: Rate limit exceeded for %s after retries. Attempting fallback.", self.provider)
+                return self._fallback_chat(messages, temperature, max_tokens, json_mode)
             raise e
         raise ValueError(f"Unknown provider: {self.provider}")
 
-    def _fallback_chat(self, messages: list[dict[str, str]], temperature: float, max_tokens: int) -> str:
+    def _fallback_chat(self, messages: list[dict[str, str]], temperature: float, max_tokens: int, json_mode: bool = False) -> str:
         # Try OpenAI if not already used
         if self.provider != LLMProvider.OPENAI and self.settings.openai_api_key:
             logger.info("LLMClient: Falling back to OpenAI")
@@ -110,12 +124,16 @@ class LLMClient:
             try:
                 from openai import OpenAI
                 temp_client = OpenAI(api_key=self.settings.openai_api_key)
-                response = temp_client.chat.completions.create(
-                    model=self.settings.openai_model,
-                    messages=messages,  # type: ignore[arg-type]
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
+                kwargs: dict[str, Any] = {
+                    "model": self.settings.openai_model,
+                    "messages": messages,  # type: ignore[arg-type]
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+                if json_mode:
+                    kwargs["response_format"] = {"type": "json_object"}
+
+                response = temp_client.chat.completions.create(**kwargs)
                 return response.choices[0].message.content or ""
             except Exception as e:
                 logger.error("LLMClient: OpenAI fallback failed: %s", e)
@@ -128,18 +146,22 @@ class LLMClient:
                 temp_client = Anthropic(api_key=self.settings.anthropic_api_key)
                 
                 system_content = ""
-                user_messages = []
-                for msg in messages:
+                user_messages = [msg.copy() for msg in messages] # Deep copy to avoid mutating original
+                final_user_messages = []
+                for msg in user_messages:
                     if msg["role"] == "system":
                         system_content += msg["content"] + "\n"
                     else:
-                        user_messages.append(msg)
+                        final_user_messages.append(msg)
+
+                if json_mode and final_user_messages:
+                    final_user_messages[-1]["content"] += "\n\nReturn ONLY a JSON object. No prose."
 
                 kwargs: dict[str, Any] = {
                     "model": self.settings.anthropic_model,
                     "max_tokens": max_tokens,
                     "temperature": temperature,
-                    "messages": user_messages,
+                    "messages": final_user_messages,
                 }
                 if system_content:
                     kwargs["system"] = system_content.strip()
@@ -177,13 +199,18 @@ class LLMClient:
         messages: list[dict[str, str]],
         temperature: float,
         max_tokens: int,
+        json_mode: bool = False,
     ) -> str:
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,  # type: ignore[arg-type]
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,  # type: ignore[arg-type]
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+            
+        response = self._client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
 
     def _chat_anthropic(
@@ -191,6 +218,7 @@ class LLMClient:
         messages: list[dict[str, str]],
         temperature: float,
         max_tokens: int,
+        json_mode: bool = False,
     ) -> str:
         # Anthropic separates system prompt from user turns
         system_content = ""
@@ -200,6 +228,9 @@ class LLMClient:
                 system_content += msg["content"] + "\n"
             else:
                 user_messages.append(msg)
+
+        if json_mode and user_messages:
+            user_messages[-1]["content"] += "\n\nReturn ONLY a JSON object. No prose."
 
         kwargs: dict[str, Any] = {
             "model": self._model,

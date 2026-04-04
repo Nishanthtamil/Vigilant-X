@@ -217,14 +217,12 @@ class SandboxRunner:
                     pass
 
             err = str(e)
-            if "compile" in err.lower() or "error:" in err.lower():
-                return SandboxResult(
-                    passed=False,
-                    compilation_error=err,
-                    compiler_override_used=compiler_override,
-                )
-            logger.error("Sandbox run error: %s", e)
-            return SandboxResult(passed=True, compiler_override_used=compiler_override)
+            logger.error("Sandbox infrastructure error: %s", e)
+            return SandboxResult(
+                passed=False, 
+                compilation_error=f"Sandbox infrastructure error: {err}",
+                compiler_override_used=compiler_override
+            )
 
 
 
