@@ -60,14 +60,79 @@ TAINT_SINKS = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# APOC Queries
+# TaintTracker
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Finds all paths from any source node to any sink node using APOC's
-# server-side path expansion. Now prioritizes PDG (REACHING_DEF) and CALL edges.
-_APOC_PATH_QUERY = """
+
+class TaintTracker:
+    """
+    Queries the Neo4j CPG to enumerate all source→sink taint paths.
+
+    Prefers APOC server-side traversal for performance; falls back to
+    pure Cypher if APOC is not installed.
+    """
+
+    def __init__(self, driver: Driver | None = None, code_law: CodeLaw | None = None) -> None:
+        self.driver = driver or get_driver()
+        self.code_law = code_law or CodeLaw()
+        self._apoc_available: bool | None = None   # lazy check
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def find_taint_paths(
+        self,
+        pr_intent: Any | None = None,
+        extra_sources: list[str] | None = None,
+        extra_sinks: list[str] | None = None,
+        changed_files: list[str] | None = None,
+    ) -> list[TaintPath]:
+        """
+        Walk the CPG and return all source→sink taint paths.
+
+        Args:
+            pr_intent: PRIntent containing dynamically detected sinks.
+            extra_sources: Additional source patterns from Code Law rules.
+            extra_sinks: Additional sink patterns from Code Law rules.
+            changed_files: List of relative paths to only start analysis from.
+        """
+        sources = list(TAINT_SOURCES) + (extra_sources or [])
+        sinks = list(TAINT_SINKS) + (extra_sinks or [])
+
+        # Add dynamic sources/sinks from intent parser
+        if pr_intent:
+            sources.extend(getattr(pr_intent, "dynamic_sources", []))
+            sinks.extend(getattr(pr_intent, "dynamic_sinks", []))
+
+        self._bridge_opaque_binaries()
+        self._resolve_virtual_calls()
+
+        logger.info(
+            "TaintTracker: searching %d sources × %d sinks via %s (scoped: %s)",
+            len(sources), len(sinks),
+            "APOC" if self._check_apoc() else "Cypher fallback",
+            "yes" if changed_files else "no"
+        )
+
+        query = self._get_query(changed_files is not None)
+        raw_paths = self._run_query(query, {
+            "sources": sources,
+            "sinks": sinks,
+            "changed_files": changed_files or [],
+            "scoped": changed_files is not None,
+        })
+        paths = [self._to_taint_path(r) for r in raw_paths]
+
+        # Annotate with Code Law rule metadata
+        paths = self._annotate_with_code_law(paths)
+
+        logger.info("TaintTracker: found %d taint paths", len(paths))
+        return paths
+
+    def _get_query(self, scoped: bool) -> str:
+        base_apoc = """
 MATCH (source:CPGNode)
 WHERE source.function_name IN $sources AND source.node_type CONTAINS 'CALL'
+  AND ($scoped = false OR source.file_path IN $changed_files)
 
 MATCH (sink:CPGNode)
 WHERE sink.function_name IN $sinks AND sink.node_type CONTAINS 'CALL'
@@ -101,11 +166,10 @@ RETURN
 ORDER BY path_len ASC
 LIMIT 100
 """
-
-# Fallback query using modern labels
-_FALLBACK_PATH_QUERY = """
+        base_fallback = """
 MATCH path = (source:CPGNode)-[:CALL|REACHING_DEF|REF*1..15]->(sink:CPGNode)
 WHERE source.function_name IN $sources AND source.node_type CONTAINS 'CALL'
+  AND ($scoped = false OR source.file_path IN $changed_files)
   AND sink.function_name IN $sinks AND sink.node_type CONTAINS 'CALL'
 RETURN
     source.node_id AS src_id,
@@ -126,68 +190,7 @@ RETURN
 ORDER BY path_len ASC
 LIMIT 100
 """
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TaintTracker
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-class TaintTracker:
-    """
-    Queries the Neo4j CPG to enumerate all source→sink taint paths.
-
-    Prefers APOC server-side traversal for performance; falls back to
-    pure Cypher if APOC is not installed.
-    """
-
-    def __init__(self, driver: Driver | None = None, code_law: CodeLaw | None = None) -> None:
-        self.driver = driver or get_driver()
-        self.code_law = code_law or CodeLaw()
-        self._apoc_available: bool | None = None   # lazy check
-
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    def find_taint_paths(
-        self,
-        pr_intent: Any | None = None,
-        extra_sources: list[str] | None = None,
-        extra_sinks: list[str] | None = None,
-    ) -> list[TaintPath]:
-        """
-        Walk the CPG and return all source→sink taint paths.
-
-        Args:
-            pr_intent: PRIntent containing dynamically detected sinks.
-            extra_sources: Additional source patterns from Code Law rules.
-            extra_sinks: Additional sink patterns from Code Law rules.
-        """
-        sources = list(TAINT_SOURCES) + (extra_sources or [])
-        sinks = list(TAINT_SINKS) + (extra_sinks or [])
-
-        # Add dynamic sources/sinks from intent parser
-        if pr_intent:
-            sources.extend(getattr(pr_intent, "dynamic_sources", []))
-            sinks.extend(getattr(pr_intent, "dynamic_sinks", []))
-
-        self._bridge_opaque_binaries()
-        self._resolve_virtual_calls()
-
-        logger.info(
-            "TaintTracker: searching %d sources × %d sinks via %s",
-            len(sources), len(sinks),
-            "APOC" if self._check_apoc() else "Cypher fallback",
-        )
-
-        query = _APOC_PATH_QUERY if self._check_apoc() else _FALLBACK_PATH_QUERY
-        raw_paths = self._run_query(query, {"sources": sources, "sinks": sinks})
-        paths = [self._to_taint_path(r) for r in raw_paths]
-
-        # Annotate with Code Law rule metadata
-        paths = self._annotate_with_code_law(paths)
-
-        logger.info("TaintTracker: found %d taint paths", len(paths))
-        return paths
+        return base_apoc if self._check_apoc() else base_fallback
 
     def _bridge_opaque_binaries(self) -> None:
         """
@@ -198,19 +201,22 @@ class TaintTracker:
         logger.info("TaintTracker: bridging opaque binaries with library summaries")
         with self.driver.session() as session:
             query = """
-            MATCH (call:CPGNode)
+            MATCH (in_node:CPGNode)-[:REACHING_DEF|CALL]->(call:CPGNode)
             WHERE call.node_type CONTAINS 'CALL' AND (
-                call.function_name IN ['memcpy', 'memmove', 'strcpy', 'strncpy', 'std::copy', 'std::copy_n']
-                OR call.function_name CONTAINS 'copy'
+                call.function_name IN ['memcpy', 'memmove', 'strcpy', 'strncpy',
+                                       'std::copy', 'std::copy_n']
             )
-            WITH call
-            MATCH (in)-[:REACHING_DEF|CALL]->(call)-[:REACHING_DEF|CALL]->(out)
-            MERGE (in)-[:REACHING_DEF {summary: true}]->(out)
+            MATCH (call)-[:REACHING_DEF|CALL]->(out_node:CPGNode)
+            WHERE NOT (in_node)-[:REACHING_DEF {summary: true}]->(out_node)
+            WITH in_node, out_node
+            LIMIT 500
+            MERGE (in_node)-[:REACHING_DEF {summary: true}]->(out_node)
             RETURN count(*) AS bridges
             """
             try:
                 result = session.run(query)
-                bridges = result.single()["bridges"]
+                record = result.single()
+                bridges = record["bridges"] if record else 0
                 logger.info("TaintTracker: created %d summary bridges", bridges)
             except Exception as e:
                 logger.debug("TaintTracker: bridging opaque binaries failed: %s", e)

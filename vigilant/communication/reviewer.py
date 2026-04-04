@@ -74,6 +74,7 @@ class Reviewer:
         self,
         pr_number: int,
         github_repo: str,
+        head_sha: str,
         vulnerabilities: list[Vulnerability],
         sandbox_results: dict[str, SandboxResult],
         poc_files: dict[str, PoCFile],
@@ -121,6 +122,7 @@ class Reviewer:
         return ReviewReport(
             pr_number=pr_number,
             github_repo=github_repo,
+            head_sha=head_sha,
             vulnerabilities=vulnerabilities,
             fixes=fixes,
             advisory_comments=advisory_comments,

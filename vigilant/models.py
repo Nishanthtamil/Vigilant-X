@@ -156,6 +156,7 @@ class Fix(BaseModel):
 class ReviewReport(BaseModel):
     pr_number: int
     github_repo: str
+    head_sha: str = ""
     vulnerabilities: list[Vulnerability] = Field(default_factory=list)
     fixes: dict[str, Fix] = Field(default_factory=dict)   # keyed by vuln_id
     advisory_comments: list[str] = Field(default_factory=list)

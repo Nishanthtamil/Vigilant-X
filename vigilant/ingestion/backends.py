@@ -1,5 +1,6 @@
 """vigilant/ingestion/backends.py — pluggable CPG backend protocol."""
 from __future__ import annotations
+import shutil
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -20,12 +21,17 @@ class SemgrepPythonBackend:
     def supported_extensions(self) -> list[str]:
         return [".py"]
     def build(self, repo_path: Path, files: list[str] | None = None) -> dict:
+        semgrep_bin = shutil.which("semgrep")
+        if semgrep_bin is None:
+            raise RuntimeError(
+                "semgrep not found on PATH. Install it with: pip install semgrep"
+            )
         import subprocess, json, tempfile, uuid
         target = files[0] if files and len(files) == 1 else str(repo_path)
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
             out_path = f.name
         subprocess.run(
-            ["/home/nishanth/Vigilant-X/.venv/bin/semgrep", "--config=p/python", "--json", "--output", out_path, target],
+            [semgrep_bin, "--config=p/python", "--json", "--output", out_path, target],
             capture_output=True, timeout=120,
         )
         try:

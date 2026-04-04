@@ -202,6 +202,26 @@ class BuildSystem(str, Enum):
     UNKNOWN = "unknown"
 
 
+_ALLOWED_FLAG_PREFIXES = (
+    "-O", "-std=", "-I", "-D", "-W", "-f", "-m", "-g",
+    "-march=", "-mtune=", "-target",
+)
+_BLOCKED_FLAG_PATTERNS = (
+    "-fplugin", "-B", "--sysroot", "-rpath", "-Wl,",
+    "-load", "-pass-plugin",
+)
+
+def _sanitize_flags(flags: list[str]) -> list[str]:
+    """Filter out dangerous or irrelevant compiler flags for the sandbox."""
+    safe = []
+    for f in flags:
+        blocked = any(f.startswith(b) for b in _BLOCKED_FLAG_PATTERNS)
+        allowed = any(f.startswith(a) for a in _ALLOWED_FLAG_PREFIXES)
+        if allowed and not blocked:
+            safe.append(f)
+    return safe
+
+
 class BuildInference:
     """
     Detects the build system of a C++ repo and determines
@@ -266,7 +286,7 @@ class BuildInference:
                 return {
                     "compiler": compiler,
                     "opt_level": opt_level,
-                    "flags": flags
+                    "flags": _sanitize_flags(flags)
                 }
         return {"compiler": self.compiler, "opt_level": "-O1", "flags": []}
 

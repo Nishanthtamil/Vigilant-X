@@ -45,6 +45,9 @@ def get_driver() -> Driver:
         _driver = GraphDatabase.driver(
             settings.neo4j_uri,
             auth=(settings.neo4j_username, settings.neo4j_password),
+            max_connection_pool_size=50,
+            connection_timeout=30,
+            max_transaction_retry_time=15,
         )
         logger.info("Neo4j driver connected to %s", settings.neo4j_uri)
     return _driver
@@ -181,6 +184,8 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
     nodes: list[dict] = []
     edges: list[dict] = []
     func_name_to_id: dict[str, str] = {}
+    # Cache: file_path -> (src_text, list of (match, fname, func_id, body_text, line_start))
+    file_parse_cache: dict[str, tuple[str, list]] = {}
 
     # Pass 1: find all functions
     # Improved regex to handle templates and some multiline signatures
@@ -198,6 +203,7 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
         p = Path(fpath)
         if not p.exists(): continue
         src_text = p.read_text(errors="replace")
+        matches = []
 
         for match in FUNC_RE.finditer(src_text):
             line_start = src_text[: match.start()].count("\n") + 1
@@ -226,31 +232,16 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
                 "node_type": "AST_FUNC",
                 "code": (match.group(0) + body)[:2000], # Include signature + body
             })
+            matches.append((match, fname, func_id, body, line_start))
+        file_parse_cache[fpath] = (src_text, matches)
 
     # Pass 2: find sources, sinks, and internal calls
     for fpath in target_files:
+        if fpath not in file_parse_cache: continue
+        src_text, matches = file_parse_cache[fpath]
         p = Path(fpath)
-        if not p.exists(): continue
-        src_text = p.read_text(errors="replace")
 
-        for match in FUNC_RE.finditer(src_text):
-            fname = match.group("name")
-            func_id = func_name_to_id.get(fname)
-            if not func_id: continue
-
-            body_start = match.end() - 1
-            body_text = src_text[body_start:]
-            depth, end_idx = 0, len(body_text) - 1
-            for i, ch in enumerate(body_text):
-                if ch == "{": depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end_idx = i
-                        break
-            body = body_text[: end_idx + 1]
-            line_start = src_text[: match.start()].count("\n") + 1
-
+        for match, fname, func_id, body, line_start in matches:
             # Find argv access (common source)
             for m in re.finditer(r"\bargv\[\d+\]", body):
                 cid = str(uuid.uuid4())
@@ -327,8 +318,9 @@ class CPGBuilder:
         force_full: bool = False,
     ) -> CPGSummary:
         """Entry point for PR-scoped or full codebase ingestion."""
+        run_id = uuid.uuid4().hex
         if force_full or not self._has_existing_cpg():
-            return self._full_parse(repo_path)
+            return self._full_parse(repo_path, run_id=run_id)
         
         from vigilant.ingestion.backends import get_backend
         # Group files by backend type for efficient batching
@@ -345,14 +337,14 @@ class CPGBuilder:
         total = CPGSummary(ingestion_mode="incremental")
         for backend_name, (backend, files) in by_backend.items():
             logger.info("CPG: Using backend %s for files: %s", backend_name, files)
-            result = self._incremental_update(repo_path, files, backend=backend)
+            result = self._incremental_update(repo_path, files, backend=backend, run_id=run_id)
             total.nodes_created += result.nodes_created
             total.edges_created += result.edges_created
         return total
 
     # ── Full parse ────────────────────────────────────────────────────────────
 
-    def _full_parse(self, repo_path: Path) -> CPGSummary:
+    def _full_parse(self, repo_path: Path, run_id: str) -> CPGSummary:
         raw_cpg = _run_joern(repo_path)
         nodes = raw_cpg.get("nodes", [])
         edges = raw_cpg.get("edges", [])
@@ -377,8 +369,11 @@ class CPGBuilder:
 
         created = 0
         with self.driver.session() as session:
-            # Clear existing graph
-            session.run("MATCH (n:CPGNode) DETACH DELETE n")
+            # Delete only nodes NOT belonging to the current run
+            session.run(
+                "MATCH (n:CPGNode) WHERE n.run_id <> $rid OR n.run_id IS NULL DETACH DELETE n",
+                rid=run_id,
+            )
             for node_data in nodes:
                 code_text = node_data.get("code", "")
                 content_hash = hash_function_content(code_text)
@@ -392,7 +387,8 @@ class CPGBuilder:
                         line_end: $line_end,
                         node_type: $node_type,
                         code: $code,
-                        content_hash: $content_hash
+                        content_hash: $content_hash,
+                        run_id: $rid
                     }
                     """,
                     node_id=node_data.get("node_id", str(uuid.uuid4())),
@@ -403,6 +399,7 @@ class CPGBuilder:
                     node_type=node_data.get("node_type", "AST_FUNC"),
                     code=code_text,
                     content_hash=content_hash,
+                    rid=run_id,
                 )
                 created += 1
 
@@ -416,7 +413,7 @@ class CPGBuilder:
 
     # ── Incremental update ────────────────────────────────────────────────────
 
-    def _incremental_update(self, repo_path: Path, changed_files: list[str], backend: Any = None) -> CPGSummary:
+    def _incremental_update(self, repo_path: Path, changed_files: list[str], backend: Any = None, run_id: str = "") -> CPGSummary:
         created = edge_count = 0
         from vigilant.ingestion.backends import JoernBackend
         if backend is None:
@@ -447,11 +444,11 @@ class CPGBuilder:
                     session.run(
                         "MERGE (n:CPGNode {node_id:$nid}) SET n += {file_path:$fp,"
                         "function_name:$fn,line_start:$ls,line_end:$le,node_type:$nt,"
-                        "code:$code,content_hash:$ch}",
+                        "code:$code,content_hash:$ch,run_id:$rid}",
                         nid=nd.get("node_id", str(uuid.uuid4())), fp=rel_path,
                         fn=nd.get("function_name",""), ls=int(nd.get("line_start",0)),
                         le=int(nd.get("line_end",0)), nt=nd.get("node_type","AST_FUNC"),
-                        code=code, ch=hash_function_content(code),
+                        code=code, ch=hash_function_content(code), rid=run_id,
                     )
                     n_count += 1
                 e_count = self._write_edges(session, raw.get("edges", []))

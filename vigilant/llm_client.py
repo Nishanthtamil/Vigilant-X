@@ -9,6 +9,7 @@ env-var change.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from vigilant.config import LLMProvider, get_settings
@@ -85,10 +86,11 @@ class LLMClient:
         messages: list[dict[str, str]],
         temperature: float = 0.2,
         max_tokens: int = 4096,
+        json_mode: bool = False,
     ) -> str:
         try:
             if self.provider == LLMProvider.GROQ:
-                return self._chat_groq(messages, temperature, max_tokens)
+                return self._chat_groq(messages, temperature, max_tokens, json_mode)
             elif self.provider == LLMProvider.OPENAI:
                 return self._chat_openai(messages, temperature, max_tokens)
             elif self.provider == LLMProvider.ANTHROPIC:
@@ -156,13 +158,18 @@ class LLMClient:
         messages: list[dict[str, str]],
         temperature: float,
         max_tokens: int,
+        json_mode: bool = False,
     ) -> str:
-        response = self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,  # type: ignore[arg-type]
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,  # type: ignore[arg-type]
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+            
+        response = self._client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ""
 
     def _chat_openai(
@@ -217,3 +224,23 @@ class LLMClient:
             ],
             **kwargs,
         )
+
+    def ask_json(self, system_prompt: str, user_prompt: str, schema_cls: type, **kwargs: Any) -> Any:
+        """One-shot convenience wrapper that returns a validated Pydantic model."""
+        import json
+        raw = self.chat(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            json_mode=True,
+            **kwargs,
+        )
+        try:
+            # Strip potential markdown fences even in JSON mode, as some providers are stubborn
+            raw_clean = re.sub(r"```(?:json)?", "", raw).strip().strip("`")
+            data = json.loads(raw_clean)
+            return schema_cls.model_validate(data)
+        except Exception as e:
+            logger.error("LLMClient: JSON validation failed: %s. Raw response: %s", e, raw)
+            raise ValueError(f"LLM produced invalid JSON for schema {schema_cls.__name__}: {e}")

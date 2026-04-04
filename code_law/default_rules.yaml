@@ -95,3 +95,10 @@ rules:
     description: "C-style cast detected. Use static_cast / reinterpret_cast / const_cast explicitly."
     pattern: "cast:c_style"
     applies_to: ["**/*.cpp", "**/*.cc"]
+
+  # ── Python Security ────────────────────────────────────────────────────────
+  - id: python_command_injection
+    severity: CRITICAL
+    description: "Insecure os.system or subprocess.run with user-controlled input."
+    pattern: "call:os.system|call:subprocess.run"
+    applies_to: ["**/*.py"]

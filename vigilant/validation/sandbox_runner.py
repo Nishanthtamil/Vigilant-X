@@ -90,7 +90,7 @@ class SandboxRunner:
             matrix = [
                 (file_meta.get("opt_level", "-O1"), "clang++"),
                 ("-O3", "clang++"),  # Catch UB optimized away or introduced at O3
-                ("-O2", "g++")       # Cross-compiler validation if available
+                ("-O2", "clang++")   # O2 sweep to catch UB that O3 optimises away
             ]
 
             final_result = SandboxResult(passed=True)

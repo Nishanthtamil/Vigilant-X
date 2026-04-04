@@ -47,38 +47,40 @@ class PRCommenter:
             repo = g.get_repo(report.github_repo)
             pr = repo.get_pull(report.pr_number)
 
-            # 1. Prepare inline comments
-            comments = []
+            # 1. Post summary review (body only, no inline comments via create_review)
+            review = pr.create_review(
+                body=report.markdown_body,
+                event="COMMENT",
+            )
+
+            # 2. Post each inline comment individually
             for vuln in report.vulnerabilities:
                 fix = report.fixes.get(vuln.vuln_id)
-                if not fix or not fix.file_path:
+                if not fix or not fix.file_path or not fix.line_end:
                     continue
                 
                 body = f"### 🔴 Vigilant-X: {vuln.summary}\n\n"
                 if fix.description:
-                    body += fix.description
+                    body += fix.description[:3800]
                 
                 # If we have a suggestion, wrap it in a suggestion block if not already there
                 if fix.suggestion and "```suggestion" not in body:
                     body += f"\n\n```suggestion\n{fix.suggestion}\n```"
 
-                comments.append({
-                    "path": fix.file_path,
-                    "line": fix.line_end, # Post at the end of the range
-                    "body": body,
-                    "side": "RIGHT"
-                })
+                try:
+                    pr.create_review_comment(
+                        body=body,
+                        commit=repo.get_commit(report.head_sha),
+                        path=fix.file_path,
+                        line=fix.line_end,
+                    )
+                except Exception as comment_err:
+                    logger.warning(
+                        "PRCommenter: could not post inline comment for %s: %s",
+                        fix.file_path, comment_err,
+                    )
 
-            # 2. Submit as a single Review
-            # Note: create_review accepts comments in a specific format
-            # and a top-level summary body.
-            pr.create_review(
-                body=report.markdown_body,
-                event="COMMENT", # Or "REQUEST_CHANGES" if critical
-                comments=comments
-            )
-            
-            logger.info("PRCommenter: posted review with %d inline comments", len(comments))
+            logger.info("PRCommenter: posted review and individual inline comments")
             report.posted_comment_url = f"https://github.com/{report.github_repo}/pull/{report.pr_number}/files"
 
         except Exception as e:

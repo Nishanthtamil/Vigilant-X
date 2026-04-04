@@ -4,7 +4,7 @@ services:
     image: neo4j:5.19-community
     container_name: vigilant-neo4j
     environment:
-      NEO4J_AUTH: neo4j/vigilant_local
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:-vigilant_local}"
       NEO4J_PLUGINS: '["apoc"]' # APOC for server-side path procedures
       NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
       NEO4J_dbms_security_procedures_allowlist: "apoc.*"

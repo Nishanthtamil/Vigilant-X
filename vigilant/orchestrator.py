@@ -33,6 +33,8 @@ from vigilant.validation.sandbox_runner import SandboxRunner
 logger = logging.getLogger(__name__)
 
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Node functions (each mutates a copy of AgentState)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,7 +87,10 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
         logger.info("[Analysis] Running taint tracker")
         code_law = CodeLaw(repo_path=repo_path)
         tracker = TaintTracker(code_law=code_law)
-        paths = tracker.find_taint_paths(pr_intent=agent.pr_intent)
+        paths = tracker.find_taint_paths(
+            pr_intent=agent.pr_intent,
+            changed_files=ctx.changed_files if ctx else None
+        )
         logger.info("[Analysis] Found %d taint paths", len(paths))
 
         logger.info("[Analysis] Running concolic engine")
@@ -96,12 +101,23 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
         # If no vulnerabilities found, or for files matching specific rules,
         # perform a direct LLM-powered review of the file content.
         if ctx:
+            def _to_relative(p: str, base: Path) -> str:
+                try:
+                    return str(Path(p).relative_to(base))
+                except ValueError:
+                    return p
+
             # Identify files that ALREADY have vulnerabilities from taint tracking
-            files_with_vulns = {v.taint_path.sink.file_path for v in vulns}
+            files_with_vulns = {_to_relative(v.taint_path.sink.file_path, repo_path) for v in vulns}
             
-            files_to_scan = ctx.changed_files if ctx.changed_files else [str(f.relative_to(repo_path)) for f in repo_path.glob("**/*") if f.is_file() and f.suffix in (".cpp", ".cc", ".c", ".h", ".hpp")]
+            files_to_scan = ctx.changed_files if ctx.changed_files else [str(f.relative_to(repo_path)) for f in repo_path.glob("**/*") if f.is_file() and f.suffix in (".cpp", ".cc", ".c", ".h", ".hpp", ".py")]
             logger.info("[Analysis] Files for Deep Scan: %s", files_to_scan)
             
+            def _run_deep_scan(args):
+                f_rel, f_path, rules = args
+                return engine.deep_scan(f_path, rules, repo_path=repo_path)
+
+            scan_args = []
             for f_rel in files_to_scan:
                 # SKIP Deep Scan if we already found a vulnerability in this file via taint tracking
                 if f_rel in files_with_vulns:
@@ -114,11 +130,21 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
                     continue
                 
                 matching_rules = code_law.rules_for_file(f_rel)
-                logger.info("[Analysis] File: %s | Matching Rules: %d", f_rel, len(matching_rules))
                 if matching_rules:
-                    deep_findings = engine.deep_scan(f_path, matching_rules)
-                    logger.info("[Analysis] Deep Scan found %d findings for %s", len(deep_findings), f_rel)
-                    vulns.extend(deep_findings)
+                    scan_args.append((f_rel, f_path, matching_rules))
+
+            if scan_args:
+                logger.info("[Analysis] Launching Deep Scan for %d files", len(scan_args))
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    futures = {pool.submit(_run_deep_scan, args): args[0] for args in scan_args}
+                    for fut in as_completed(futures):
+                        try:
+                            deep_findings = fut.result()
+                            if deep_findings:
+                                logger.info("[Analysis] Deep Scan found %d findings for %s", len(deep_findings), futures[fut])
+                                vulns.extend(deep_findings)
+                        except Exception as exc:
+                            logger.error("[Analysis] Deep scan failed for %s: %s", futures[fut], exc)
 
         agent.taint_paths = paths
         agent.vulnerabilities = vulns
@@ -148,9 +174,11 @@ def node_validate(state: dict[str, Any]) -> dict[str, Any]:
 
     settings = get_settings()
 
+    updated_vulns = []
     for vuln in agent.vulnerabilities:
         # Skip ADVISORY — no PoC or sandbox needed
         if vuln.status == VulnerabilityStatus.ADVISORY:
+            updated_vulns.append(vuln)
             continue
 
         try:
@@ -166,13 +194,13 @@ def node_validate(state: dict[str, Any]) -> dict[str, Any]:
                 # ── Sandbox Tie-Breaker ───────────────────────────────────────
                 # If sandbox confirmed a crash, upgrade status
                 if not result.passed and not result.compilation_error:
-                    vuln.status = VulnerabilityStatus.SANDBOX_VERIFIED
+                    vuln = vuln.model_copy(update={"status": VulnerabilityStatus.SANDBOX_VERIFIED})
                     logger.info("[Validation] Sandbox CRASH confirmed: %s", result.crash_type)
                 elif result.passed:
                     # If sandbox passed (no crash), it's a False Positive or unexploitable
                     # Downgrade from PROVEN/FUZZ_VERIFIED to WARNING
                     old_status = vuln.status
-                    vuln.status = VulnerabilityStatus.WARNING
+                    vuln = vuln.model_copy(update={"status": VulnerabilityStatus.WARNING})
                     logger.info(
                         "[Validation] Sandbox PASSED (no crash). Downgrading %s: %s → WARNING",
                         vuln.vuln_id[:8], old_status
@@ -185,6 +213,10 @@ def node_validate(state: dict[str, Any]) -> dict[str, Any]:
         except Exception as e:
             agent.errors.append(f"Validation error for {vuln.vuln_id[:8]}: {e}")
             logger.error("[Validation] Error: %s", e)
+        
+        updated_vulns.append(vuln)
+
+    agent.vulnerabilities = updated_vulns
 
     return agent.model_dump()
 
@@ -198,11 +230,16 @@ def node_communicate(state: dict[str, Any]) -> dict[str, Any]:
 
     try:
         repo_path = Path(ctx.repo_path)
+        from vigilant.suppression import load_suppressions, apply_suppressions
+        suppressions = load_suppressions(repo_path)
+        agent.vulnerabilities = apply_suppressions(agent.vulnerabilities, suppressions)
+
         sandbox = SandboxRunner(repo_path=repo_path) if not agent.dry_run else None
         reviewer = Reviewer(sandbox_runner=sandbox)
         report = reviewer.generate_report(
             pr_number=ctx.pr_number,
             github_repo=ctx.github_repo,
+            head_sha=ctx.head_sha,
             vulnerabilities=agent.vulnerabilities,
             sandbox_results=agent.sandbox_results,
             poc_files=agent.poc_files,

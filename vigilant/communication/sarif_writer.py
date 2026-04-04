@@ -1,6 +1,7 @@
 """vigilant/communication/sarif_writer.py — SARIF 2.1.0 for GitHub Code Scanning."""
 from __future__ import annotations
 import json
+import hashlib
 from pathlib import Path
 from vigilant.models import AgentState, VulnerabilityStatus
 
@@ -13,6 +14,11 @@ _LEVEL = {
     VulnerabilityStatus.WARNING: "note",
     VulnerabilityStatus.ADVISORY: "note",
 }
+
+def _fingerprint(vuln) -> str:
+    p = vuln.taint_path
+    sig = f"{p.sink.file_path}:{p.sink.line_number}:{p.rule_id or 'memory-safety'}"
+    return hashlib.sha256(sig.encode()).hexdigest()[:32]
 
 def write_sarif(state: AgentState, output_path: Path) -> None:
     results = []
@@ -36,7 +42,7 @@ def write_sarif(state: AgentState, output_path: Path) -> None:
                     "region": {"startLine": max(1, p.source.line_number)},
                 }
             }],
-            "partialFingerprints": {"sourceHash": vuln.vuln_id[:16]},
+            "partialFingerprints": {"primaryLocationLineHash/v1": _fingerprint(vuln)},
             "properties": {"confidence": round(vuln.confidence, 2), "z3Proof": vuln.z3_proof},
         })
 
