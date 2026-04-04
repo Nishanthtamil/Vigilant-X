@@ -80,6 +80,8 @@ class TaintPath(BaseModel):
     crosses_files: bool = False
     rule_id: str = ""        # Code Law rule that triggered this path
     rule_severity: str = ""  # "CRITICAL" | "ADVISORY"
+    was_pruned: bool = False
+    pruner_score: float = 0.0
 
     @property
     def full_path(self) -> list[TaintNode]:

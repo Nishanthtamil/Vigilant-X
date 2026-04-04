@@ -213,6 +213,12 @@ def node_communicate(state: dict[str, Any]) -> dict[str, Any]:
         agent.review_report = report
         logger.info("[Communication] Report posted: %s", report.posted_comment_url)
 
+        # Write SARIF output
+        from vigilant.communication.sarif_writer import write_sarif
+        sarif_out = Path(ctx.repo_path) / "vigilant-results.sarif"
+        write_sarif(agent, sarif_out)
+        logger.info("[Communication] SARIF written to %s", sarif_out)
+
     except Exception as e:
         agent.errors.append(f"Communication error: {e}")
         logger.error("[Communication] Error: %s", e)

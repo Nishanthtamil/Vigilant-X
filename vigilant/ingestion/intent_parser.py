@@ -16,6 +16,10 @@ from vigilant.models import PRContext, PRIntent
 
 logger = logging.getLogger(__name__)
 
+_surface_cache: dict[str, tuple[list[str], list[str]]] = {}
+MAX_SURFACE_CALLS = 5
+import hashlib as _hs
+
 _SYSTEM_PROMPT = """You are a senior C++ architect performing a security-focused code review.
 Your task is to analyze a Pull Request and extract structured intent.
 
@@ -68,20 +72,27 @@ class IntentParser:
             repo_path = Path(pr_context.repo_path)
             # 1. Global Scan: identify core library types and interaction patterns
             # 2. Changed File Scan: specific new sinks/sources
+            calls = 0
             for f_rel in pr_context.changed_files[:10]: # Expanded to 10 files
+                if calls >= MAX_SURFACE_CALLS:
+                    break
                 f_path = repo_path / f_rel
                 if f_path.exists() and f_path.suffix in (".h", ".hpp", ".cpp"):
                     sources, sinks = self.detect_api_surface(f_path)
                     intent.dynamic_sources.extend(sources)
                     intent.dynamic_sinks.extend(sinks)
+                    calls += 1
             
             # Global Discovery: Sample 5 header files to identify project 'personality'
             # Sort for determinism
             headers = sorted(list(repo_path.rglob("*.h")) + list(repo_path.rglob("*.hpp")))
             for h_path in headers[:5]:
+                if calls >= MAX_SURFACE_CALLS:
+                    break
                 sources, sinks = self.detect_api_surface(h_path)
                 intent.dynamic_sources.extend(sources)
                 intent.dynamic_sinks.extend(sinks)
+                calls += 1
 
             # Deduplicate
             intent.dynamic_sources = list(set(intent.dynamic_sources))
@@ -95,19 +106,46 @@ class IntentParser:
     def detect_api_surface(self, file_path: Path) -> tuple[list[str], list[str]]:
         """Use LLM to identify potential security-sensitive functions in a file."""
         try:
-            content = file_path.read_text(errors="replace")[:4000] # First 4k chars
+            raw_bytes = file_path.read_bytes()
+            
+            # Guard 1 — size: skip anything over 16KB (generated code, embedded blobs)
+            if len(raw_bytes) > 16_384:
+                logger.debug("API surface skip %s: >16KB", file_path.name)
+                return [], []
+
+            # Guard 2 — binary: >20% non-printable bytes in first 512 = likely binary header
+            sample = raw_bytes[:512]
+            non_printable = sum(1 for b in sample if b < 0x20 and b not in (9, 10, 13))
+            if len(sample) > 0 and non_printable / len(sample) > 0.20:
+                logger.debug("API surface skip %s: binary content", file_path.name)
+                return [], []
+
+            content = raw_bytes.decode("utf-8", errors="replace")
+            
+            # Guard 3 — C++ signal: must have at least 2 #includes OR :: usage
+            if content.count("#include") < 2 and "::" not in content:
+                logger.debug("API surface skip %s: no C++ signal", file_path.name)
+                return [], []
+
+            key = _hs.sha256(raw_bytes).hexdigest()
+            if key in _surface_cache:
+                return _surface_cache[key]
+
+            content_truncated = content[:4000]
             prompt = (
                 f"You are analyzing a C++ project to identify 'Semantic Sinks' and 'Sources'.\n"
                 f"Sources: Functions that read untrusted data (e.g., from network, files, user input).\n"
                 f"Sinks: Functions that perform logical dangerous operations (e.g., memory writes, custom buffer copies, execution, state mutation), regardless of their name (e.g., a custom `Buffer::writeData` or `SmartPtr::reset`).\n\n"
                 f"Return ONLY a JSON object: {{\"sources\": [\"func1\", \"func2\"], \"sinks\": [\"func3\"]}}\n\n"
-                f"CODE:\n{content}"
+                f"CODE:\n{content_truncated}"
             )
             raw = self.llm.ask("You are a C++ security expert.", prompt, temperature=0.0, max_tokens=512)
             import json
             raw = re.sub(r"```(?:json)?", "", raw).strip().strip("`")
             data = json.loads(raw)
-            return data.get("sources", []), data.get("sinks", [])
+            result = (data.get("sources", []), data.get("sinks", []))
+            _surface_cache[key] = result
+            return result
         except Exception as e:
             logger.debug("IntentParser: API surface detection failed for %s: %s", file_path.name, e)
             return [], []

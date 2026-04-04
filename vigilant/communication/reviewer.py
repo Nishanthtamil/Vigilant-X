@@ -24,6 +24,9 @@ from vigilant.models import (
 
 logger = logging.getLogger(__name__)
 
+MAX_REVIEW_CHARS = 4_000
+_TRUNCATED_NOTE = "\n\n_Full analysis truncated — see GitHub Actions logs._"
+
 _ROOT_CAUSE_SYSTEM = """You are a principal C++ security engineer writing a Gold Standard code review report.
 
 Your analysis must:
@@ -161,8 +164,10 @@ Provide the root cause explanation and a C++20/23 fix suggestion.
                 line_start = path.sink.line_number
                 line_end = path.sink.line_number
 
+            raw_out = raw[:MAX_REVIEW_CHARS] + (_TRUNCATED_NOTE if len(raw) > MAX_REVIEW_CHARS else "")
+
             return Fix(
-                description=raw,
+                description=raw_out,
                 diff=diff,
                 suggestion=suggestion,
                 file_path=file_path,
@@ -289,7 +294,7 @@ Provide the root cause explanation and a C++20/23 fix suggestion.
                     "#### Evidence (Sanitizer Report)",
                     f"**Sanitizer:** {sandbox.sanitizer} | **Crash type:** `{sandbox.crash_type}`",
                     "```",
-                    sandbox.stack_trace[:1200],
+                    sandbox.stack_trace[:800],
                     "```",
                     "",
                 ]

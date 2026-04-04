@@ -20,6 +20,7 @@ import logging
 import subprocess
 import tempfile
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -325,21 +326,29 @@ class CPGBuilder:
         base_commit: str = "",
         force_full: bool = False,
     ) -> CPGSummary:
-        """
-        Entry point. Chooses full vs incremental strategy automatically.
-
-        Args:
-            repo_path: Absolute path to the checked-out repo.
-            changed_files: Files changed in the PR (relative paths).
-            base_commit: The base commit SHA (used to determine if DB is populated).
-            force_full: If True, always do a full re-parse.
-        """
+        """Entry point for PR-scoped or full codebase ingestion."""
         if force_full or not self._has_existing_cpg():
-            logger.info("CPG: full parse mode")
             return self._full_parse(repo_path)
-        else:
-            logger.info("CPG: incremental update for %d files", len(changed_files))
-            return self._incremental_update(repo_path, changed_files)
+        
+        from vigilant.ingestion.backends import get_backend
+        # Group files by backend type for efficient batching
+        by_backend: dict[str, tuple[Any, list[str]]] = {}
+        for f in changed_files:
+            ext = Path(f).suffix
+            backend = get_backend(ext)
+            backend_name = type(backend).__name__
+            if backend_name not in by_backend:
+                by_backend[backend_name] = (backend, [])
+            by_backend[backend_name][1].append(f)
+        
+        # Process each group
+        total = CPGSummary(ingestion_mode="incremental")
+        for backend_name, (backend, files) in by_backend.items():
+            logger.info("CPG: Using backend %s for files: %s", backend_name, files)
+            result = self._incremental_update(repo_path, files, backend=backend)
+            total.nodes_created += result.nodes_created
+            total.edges_created += result.edges_created
+        return total
 
     # ── Full parse ────────────────────────────────────────────────────────────
 
@@ -407,86 +416,59 @@ class CPGBuilder:
 
     # ── Incremental update ────────────────────────────────────────────────────
 
-    def _incremental_update(self, repo_path: Path, changed_files: list[str]) -> CPGSummary:
-        """
-        For each changed file:
-        1. Clear existing nodes in Neo4j to avoid ID collisions.
-        2. Parse with Joern (file-scoped).
-        3. Insert new nodes and edges.
-        """
-        created = updated = unchanged = edge_count = 0
+    def _incremental_update(self, repo_path: Path, changed_files: list[str], backend: Any = None) -> CPGSummary:
+        created = edge_count = 0
+        from vigilant.ingestion.backends import JoernBackend
+        if backend is None:
+            backend = JoernBackend()
 
-        for rel_path in changed_files:
-            abs_path = repo_path / rel_path
-            
-            # Always clear existing nodes for the file before re-ingesting
-            # This is the "clean upsert" strategy to avoid Neo.ClientError.Schema.ConstraintValidationFailed
+        def _process(rel_path: str) -> tuple[int, int]:
             self._delete_file_nodes(rel_path)
-            
+            abs_path = repo_path / rel_path
             if not abs_path.exists():
-                # File was actually deleted
-                continue
-
-            raw_cpg = _run_joern(repo_path, files=[str(abs_path)])
-            new_nodes = raw_cpg.get("nodes", [])
-            new_edges = raw_cpg.get("edges", [])
-
-            # Map local Joern IDs to global unique IDs
+                return 0, 0
+            
+            raw = backend.build(repo_path, files=[str(abs_path)])
+            nodes_data = raw.get("nodes", [])
             id_map: dict[str, str] = {}
-            for node_data in new_nodes:
-                local_id = str(node_data.get("node_id", ""))
+            for nd in nodes_data:
+                local_id = str(nd.get("node_id", ""))
                 if local_id:
                     global_id = hashlib.sha256(f"{rel_path}:{local_id}".encode()).hexdigest()
                     id_map[local_id] = global_id
-                    node_data["node_id"] = global_id
-
-            for edge in new_edges:
-                src_local = str(edge.get("src", ""))
-                dst_local = str(edge.get("dst", ""))
-                if src_local in id_map:
-                    edge["src"] = id_map[src_local]
-                if dst_local in id_map:
-                    edge["dst"] = id_map[dst_local]
-
+                    nd["node_id"] = global_id
+            for e in raw.get("edges", []):
+                if str(e.get("src","")) in id_map: e["src"] = id_map[str(e["src"])]
+                if str(e.get("dst","")) in id_map: e["dst"] = id_map[str(e["dst"])]
+            n_count = e_count = 0
             with self.driver.session() as session:
-                for node_data in new_nodes:
-                    node_type = node_data.get("node_type", "AST_FUNC")
-                    code_text = node_data.get("code", "")
-                    new_hash = hash_function_content(code_text)
-                    node_id = node_data.get("node_id", str(uuid.uuid4()))
-                    
+                for nd in nodes_data:
+                    code = nd.get("code", "")
                     session.run(
-                        """
-                        MERGE (n:CPGNode {node_id: $node_id})
-                        SET n += {
-                            file_path: $file_path,
-                            function_name: $function_name,
-                            line_start: $line_start,
-                            line_end: $line_end,
-                            node_type: $node_type,
-                            code: $code,
-                            content_hash: $content_hash
-                        }
-                        """,
-                        node_id=node_id,
-                        file_path=rel_path,
-                        function_name=node_data.get("function_name", ""),
-                        line_start=int(node_data.get("line_start", 0)),
-                        line_end=int(node_data.get("line_end", 0)),
-                        node_type=node_type,
-                        code=code_text,
-                        content_hash=new_hash,
+                        "MERGE (n:CPGNode {node_id:$nid}) SET n += {file_path:$fp,"
+                        "function_name:$fn,line_start:$ls,line_end:$le,node_type:$nt,"
+                        "code:$code,content_hash:$ch}",
+                        nid=nd.get("node_id", str(uuid.uuid4())), fp=rel_path,
+                        fn=nd.get("function_name",""), ls=int(nd.get("line_start",0)),
+                        le=int(nd.get("line_end",0)), nt=nd.get("node_type","AST_FUNC"),
+                        code=code, ch=hash_function_content(code),
                     )
-                    created += 1
+                    n_count += 1
+                e_count = self._write_edges(session, raw.get("edges", []))
+            return n_count, e_count
 
-                # Write edges for this file's updated nodes
-                edge_count += self._write_edges(session, new_edges)
+        # Cap workers to avoid saturating the Neo4j connection pool
+        workers = min(4, len(changed_files))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_process, f): f for f in changed_files}
+            for fut in as_completed(futures):
+                try:
+                    n, e = fut.result()
+                    created += n; edge_count += e
+                except Exception as exc:
+                    logger.error("Ingestion failed for %s: %s", futures[fut], exc)
 
-        return CPGSummary(
-            nodes_created=created,
-            edges_created=edge_count,
-            ingestion_mode="incremental",
-        )
+        return CPGSummary(nodes_created=created, edges_created=edge_count, ingestion_mode="incremental")
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -506,33 +488,42 @@ class CPGBuilder:
 
     def _write_edges(self, session: Any, edges: list[dict]) -> int:
         count = 0
-        # Group edges by type to run batch MERGE queries
         by_type: dict[str, list[tuple[str, str]]] = {}
         for edge in edges:
             etype = edge.get("type", "CALL").upper()
-            src = edge.get("src", "")
-            dst = edge.get("dst", "")
+            src, dst = edge.get("src", ""), edge.get("dst", "")
             if src and dst:
                 by_type.setdefault(etype, []).append((src, dst))
 
         for etype, pairs in by_type.items():
-            # Neo4j doesn't allow parameterized relationship types, 
-            # so we use APOC to merge with dynamic types safely.
-            session.run(
-                """
-                UNWIND $pairs AS pair
-                MATCH (a:CPGNode {node_id: pair[0]})
-                MATCH (b:CPGNode {node_id: pair[1]})
-                CALL apoc.merge.relationship(a, $etype, {}, {}, b, {})
-                YIELD rel
-                RETURN count(*)
-                """,
-                pairs=pairs,
-                etype=etype
-            )
-            count += len(pairs)
+            try:
+                session.run(
+                    """
+                    UNWIND $pairs AS pair
+                    MATCH (a:CPGNode {node_id: pair[0]})
+                    MATCH (b:CPGNode {node_id: pair[1]})
+                    CALL apoc.merge.relationship(a, $etype, {}, {}, b, {}) YIELD rel
+                    RETURN count(*)
+                    """,
+                    pairs=pairs, etype=etype,
+                )
+                count += len(pairs)
+            except Exception:
+                # APOC absent — fall back to per-pair MERGE with dynamic rel type.
+                # Sanitise etype to prevent injection (only A-Z _ allowed after uppercasing).
+                safe = "".join(c for c in etype if c.isalpha() or c == "_")
+                for src, dst in pairs:
+                    try:
+                        session.run(
+                            f"MATCH (a:CPGNode {{node_id:$s}}) "
+                            f"MATCH (b:CPGNode {{node_id:$d}}) "
+                            f"MERGE (a)-[:`{safe}`]->(b)",
+                            s=src, d=dst,
+                        )
+                        count += 1
+                    except Exception as e2:
+                        logger.warning("Edge write failed %s→%s: %s", src, dst, e2)
         return count
-
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         with self.driver.session() as session:
             result = session.run(
@@ -559,11 +550,6 @@ class CPGBuilder:
                     function_name=n["function_name"],
                     line_start=n.get("line_start", 0),
                     line_end=n.get("line_end", 0),
-                    node_type=n.get("node_type", "AST_FUNC"),
-                    content_hash=n.get("content_hash", ""),
-                ))
-            return nodes
-   line_end=n.get("line_end", 0),
                     node_type=n.get("node_type", "AST_FUNC"),
                     content_hash=n.get("content_hash", ""),
                 ))

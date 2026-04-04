@@ -58,7 +58,7 @@ jobs:
           USE_LOCAL_NEO4J: "true"
           NEO4J_LOCAL_URI: bolt://localhost:7687
           NEO4J_LOCAL_USERNAME: neo4j
-          NEO4J_LOCAL_PASSWORD: vigilant_local
+          NEO4J_LOCAL_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
           SANDBOX_IMAGE: vigilant-x-sandbox:latest
           Z3_MEMORY_LIMIT_MB: "2048"
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -70,3 +70,11 @@ jobs:
             --pr-number "$PR_NUMBER" \
             --base-sha "$PR_BASE_SHA" \
             --head-sha "$PR_HEAD_SHA"
+
+      - name: Upload SARIF to Code Scanning
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: vigilant-results.sarif
+          category: vigilant-x
+"$PR_HEAD_SHA"

@@ -22,8 +22,10 @@ import subprocess
 import tempfile
 import time
 import uuid
+import hashlib as _hs
+from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import z3  # type: ignore[import]
 
@@ -67,22 +69,41 @@ class HeuristicPathPruner:
     def prune(self, paths: list[TaintPath]) -> list[TaintPath]:
         if not paths:
             return paths
+        scored = sorted([(self._score(p), p) for p in paths], key=lambda x: x[0], reverse=True)
+        for score, p in scored:
+            p.pruner_score = score
 
-        # Score-based sort
-        scored = [(self._score(p), p) for p in paths]
-        scored.sort(key=lambda x: x[0], reverse=True)
         ranked = [p for _, p in scored]
-
-        # Hard cap before LLM ranking step
         if len(ranked) > self.MAX_PATHS_BEFORE_LLM and self.llm:
-            ranked = self._llm_rerank(ranked[: self.MAX_PATHS_BEFORE_LLM * 2])
+            ranked = self._llm_rerank(ranked[:self.MAX_PATHS_BEFORE_LLM * 2])
 
-        # Return top 20 to keep Z3 workload manageable
-        result = ranked[: self.MAX_PATHS_BEFORE_LLM]
-        logger.info(
-            "HeuristicPathPruner: %d → %d paths after pruning", len(paths), len(result)
-        )
-        return result
+        kept_set = {p.path_id for p in ranked[:self.MAX_PATHS_BEFORE_LLM]}
+        for p in paths:
+            p.was_pruned = p.path_id not in kept_set
+
+        pruned = [p for p in paths if p.was_pruned]
+        if pruned:
+            self._log_pruned(pruned)
+
+        logger.info("HeuristicPathPruner: %d → %d (%d pruned)", len(paths), len(kept_set), len(pruned))
+        return [p for p in ranked if not p.was_pruned][:self.MAX_PATHS_BEFORE_LLM]
+
+    def _log_pruned(self, paths: list[TaintPath]) -> None:
+        """Persist pruned paths to Neo4j for offline scorer analysis."""
+        try:
+            from vigilant.ingestion.cpg_builder import get_driver
+            with get_driver().session() as s:
+                for p in paths:
+                    s.run(
+                        "MERGE (pp:PrunedPath {path_id:$pid}) "
+                        "SET pp.score=$sc, pp.sink=$sk, pp.source=$sr, "
+                        "pp.crosses_files=$xf, pp.recorded=datetime()",
+                        pid=p.path_id, sc=p.pruner_score,
+                        sk=p.sink.function_name, sr=p.source.function_name,
+                        xf=p.crosses_files,
+                    )
+        except Exception as e:
+            logger.debug("Pruned path logging failed: %s", e)
 
     def _score(self, path: TaintPath) -> float:
         score = 0.0
@@ -144,7 +165,44 @@ class Z3Solver:
         self.llm = llm
         logger.debug("Z3Solver: memory limit = %d MB", limit)
 
+    def _cache_key(self, path: TaintPath) -> str:
+        sig = (f"{path.source.function_name}|{path.source.file_path}|"
+               f"{path.sink.function_name}|{path.sink.file_path}|"
+               f"{path.rule_id}")
+        return _hs.sha256(sig.encode()).hexdigest()
+
     def solve(self, path: TaintPath) -> tuple[VulnerabilityStatus, list[WitnessValue], str]:
+        key = self._cache_key(path)
+        # Check cache first
+        try:
+            with self.builder.driver.session() as s:
+                rec = s.run(
+                    "MATCH (c:ProofCache {key:$k}) RETURN c.status AS st, c.formula AS f",
+                    k=key,
+                ).single()
+                if rec:
+                    logger.info("Z3: cache hit for %s", path.path_id[:8])
+                    return VulnerabilityStatus(rec["st"]), [], rec["f"] or ""
+        except Exception:
+            pass  # cache unavailable — proceed normally
+
+        # Run the solver
+        status, witnesses, formula = self._run_solve(path)
+
+        # Store result
+        try:
+            with self.builder.driver.session() as s:
+                s.run(
+                    "MERGE (c:ProofCache {key:$k}) "
+                    "SET c.status=$st, c.formula=$f, c.updated=datetime()",
+                    k=key, st=status.value, f=formula,
+                )
+        except Exception:
+            pass  # cache write failure is non-fatal
+
+        return status, witnesses, formula
+
+    def _run_solve(self, path: TaintPath) -> tuple[VulnerabilityStatus, list[WitnessValue], str]:
         """
         Build a Z3 formula for the path and check satisfiability.
 
@@ -419,48 +477,69 @@ class ConcolicEngine:
         """
         Analyze a list of taint paths and return confirmed Vulnerabilities.
 
-        ADVISORY-severity paths skip Z3/fuzzer and go straight to WARNING status.
-        CRITICAL-severity paths go through both phases until the time limit is reached.
+        ADVISORY-severity paths skip Z3/fuzzer and go straight to ADVISORY status.
+        CRITICAL-severity paths go through both phases in parallel.
         """
-        start_time = time.time()
-        
-        # Separate by severity
-        critical_paths = [p for p in paths if p.rule_severity != RuleSeverity.ADVISORY.value]
-        advisory_paths = [p for p in paths if p.rule_severity == RuleSeverity.ADVISORY.value]
+        start = time.time()
+        advisory = [p for p in paths if p.rule_severity == RuleSeverity.ADVISORY.value]
+        critical = [p for p in paths if p.rule_severity != RuleSeverity.ADVISORY.value]
+        pruned = self.pruner.prune(critical)
 
-        # Prune critical paths to manageable count (increased from 20 to 100)
-        pruned = self.pruner.prune(critical_paths)
+        results: list[Vulnerability] = [
+            Vulnerability(vuln_id=str(uuid.uuid4()), taint_path=p,
+                          status=VulnerabilityStatus.ADVISORY, confidence=0.5,
+                          summary=f"Advisory: {p.sink.function_name} in {p.sink.file_path}")
+            for p in advisory
+        ]
 
-        vulnerabilities: list[Vulnerability] = []
+        def _solve(p: TaintPath) -> Vulnerability:
+            # Each thread owns its Z3Solver — no shared state
+            solver = Z3Solver(llm=self.llm)
+            return self._analyze_path_with_solver(p, solver)
 
-        # ADVISORY: skip sandbox, record as ADVISORY status
-        for path in advisory_paths:
-            vulnerabilities.append(Vulnerability(
-                vuln_id=str(uuid.uuid4()),
-                taint_path=path,
-                status=VulnerabilityStatus.ADVISORY,
-                confidence=0.5,
-                summary=f"Advisory: {path.sink.function_name} in {path.sink.file_path}",
-            ))
+        budget = time_limit_seconds - (time.time() - start)
+        if pruned:
+            with ThreadPoolExecutor(max_workers=min(8, len(pruned))) as pool:
+                futs = {pool.submit(_solve, p): p for p in pruned}
+                try:
+                    for fut in _as_completed(futs, timeout=max(budget, 1)):
+                        try:
+                            results.append(fut.result())
+                        except Exception as exc:
+                            logger.error("Z3 solve failed: %s", exc)
+                except TimeoutError:
+                    logger.warning("ConcolicEngine: time budget exhausted (%ds)", time_limit_seconds)
 
-        # CRITICAL: full two-phase analysis
-        for path in pruned:
-            # Check time budget
-            elapsed = time.time() - start_time
-            if elapsed > time_limit_seconds:
-                logger.warning("ConcolicEngine: time budget exhausted (%ds), skipping remaining %d paths", time_limit_seconds, len(pruned) - len(vulnerabilities) + len(advisory_paths))
-                break
-
-            vuln = self._analyze_path(path)
-            vulnerabilities.append(vuln)
-
-        proven = sum(1 for v in vulnerabilities if v.status == VulnerabilityStatus.PROVEN)
-        fuzz_found = sum(1 for v in vulnerabilities if v.status == VulnerabilityStatus.FUZZ_VERIFIED)
+        proven = sum(1 for v in results if v.status == VulnerabilityStatus.PROVEN)
+        fuzz_found = sum(1 for v in results if v.status == VulnerabilityStatus.FUZZ_VERIFIED)
         logger.info(
             "ConcolicEngine: %d total | %d proven | %d fuzz-verified | %d advisory",
-            len(vulnerabilities), proven, fuzz_found, len(advisory_paths),
+            len(results), proven, fuzz_found, len(advisory),
         )
-        return vulnerabilities
+        return results
+
+    def _analyze_path_with_solver(self, path: TaintPath, solver: "Z3Solver") -> Vulnerability:
+        """Same logic as old _analyze_path but accepts an injected solver instance."""
+        vuln_id = str(uuid.uuid4())
+        try:
+            status, witnesses, formula = solver.solve(path)
+            confidence = 0.95 if status == VulnerabilityStatus.PROVEN else 0.2
+            return Vulnerability(
+                vuln_id=vuln_id, taint_path=path, status=status, z3_formula=formula,
+                witness_values=witnesses, z3_proof=formula,
+                confidence=confidence,
+                summary=self._summarize(path, status, witnesses),
+            )
+        except Z3UnknownError:
+            pass
+        
+        fuzz_status, crash = self.fuzzer.fuzz(self._generate_fuzz_harness(path))
+        confidence = 0.80 if fuzz_status == VulnerabilityStatus.FUZZ_VERIFIED else 0.15
+        return Vulnerability(
+            vuln_id=vuln_id, taint_path=path, status=fuzz_status, fuzz_crash_input=crash,
+            confidence=confidence,
+            summary=self._summarize(path, fuzz_status, []),
+        )
 
     def deep_scan(self, file_path: Path, rules: list[Any]) -> list[Vulnerability]:
         """
@@ -583,39 +662,6 @@ class ConcolicEngine:
                 summary=f"Deep Scan Finding in {file_path.name} (Unstructured)",
                 z3_proof=response,
             )]
-
-    def _analyze_path(self, path: TaintPath) -> Vulnerability:
-        vuln_id = str(uuid.uuid4())
-
-        # Phase 1: Z3
-        try:
-            status, witnesses, formula = self.z3_solver.solve(path)
-            confidence = 0.95 if status == VulnerabilityStatus.PROVEN else 0.2
-            return Vulnerability(
-                vuln_id=vuln_id,
-                taint_path=path,
-                status=status,
-                z3_formula=formula,
-                witness_values=witnesses,
-                z3_proof=formula,
-                confidence=confidence,
-                summary=self._summarize(path, status, witnesses),
-            )
-        except Z3UnknownError:
-            pass
-
-        # Phase 2: LibFuzzer
-        harness = self._generate_fuzz_harness(path)
-        fuzz_status, crash_input = self.fuzzer.fuzz(harness)
-        confidence = 0.80 if fuzz_status == VulnerabilityStatus.FUZZ_VERIFIED else 0.15
-        return Vulnerability(
-            vuln_id=vuln_id,
-            taint_path=path,
-            status=fuzz_status,
-            fuzz_crash_input=crash_input,
-            confidence=confidence,
-            summary=self._summarize(path, fuzz_status, []),
-        )
 
     def _generate_fuzz_harness(self, path: TaintPath) -> str:
         """

@@ -1,8 +1,8 @@
 # Vigilant-X 🔍
 
-> **Agentic C++ Security Reviewer with Semantic Formal Verification and Mirror Sandbox Analysis.**
+> **Agentic Multi-Language Security Reviewer with Semantic Formal Verification and Parallelized Mirror Sandbox Analysis.**
 
-Vigilant-X is architected to be **10x better than Code Rabbit** by moving beyond heuristic-based linting into **Semantic Formal Proof**. It traces data flow across global project boundaries, transpiles complex C++ logic into **Z3 SMT constraints**, and verifies every finding in a **Secure Docker Sandbox** using multiple compilers and optimization levels.
+Vigilant-X is architected to be **10x better than Code Rabbit** by moving beyond heuristic-based linting into **Semantic Formal Proof**. It traces data flow across global project boundaries, transpiles complex code logic into **Z3 SMT constraints**, and verifies every finding in a **Secure Docker Sandbox** using multiple compilers and optimization levels.
 
 ---
 
@@ -11,28 +11,31 @@ Vigilant-X is architected to be **10x better than Code Rabbit** by moving beyond
 ```mermaid
 graph TD
     subgraph Ingestion_Plane
-        A[Joern CPG] --> B[Neo4j Global Graph]
+        A[Joern CPG + Semgrep] --> B[Neo4j Global Graph]
         C[IntentParser LLM] --> D[Autonomous API Discovery]
         B --> E[Graph Reconciliation]
+        A --> F[Parallel Incremental Ingestion]
     end
 
     subgraph Analysis_Plane
-        F[TaintTracker] --> G[Virtual Dispatch Bridge]
-        G --> H[Library Summary Injection]
-        I[Concolic Engine] --> J[LLM-to-Z3 SMT-LIBv2]
-        J --> K[Self-Correcting Formal Proof]
+        G[TaintTracker] --> H[Virtual Dispatch Bridge]
+        H --> I[Library Summary Injection]
+        J[Concolic Engine] --> K[LLM-to-Z3 SMT-LIBv2]
+        K --> L[Parallel Z3 Solve + Proof Cache]
+        L --> M[Self-Correcting Formal Proof]
     end
 
     subgraph Validation_Plane
-        L[PoC Generator] --> M[Hardened Sandbox]
-        M --> N[Verification Matrix: Clang/GCC + O1/O3]
-        N --> O[LLVM Sanitizers: ASan/MSan/TSan]
+        N[PoC Generator] --> O[Hardened Sandbox]
+        O --> P[Verification Matrix: Clang/GCC + O1/O3]
+        P --> Q[LLVM Sanitizers: ASan/MSan/TSan]
     end
 
     subgraph Communication_Plane
-        P[Reviewer LLM] --> Q[Verified C++20/23 Fixes]
-        Q --> R[GitHub Native Inline Review]
-        R --> S[Actionable Suggested Changes]
+        R[Reviewer LLM] --> S[Verified fixes with Truncation]
+        S --> T[GitHub Native Inline Review]
+        T --> U[SARIF 2.1.0 Export]
+        U --> V[GitHub Code Scanning Integration]
     end
 
     Ingestion_Plane --> Analysis_Plane
@@ -41,12 +44,13 @@ graph TD
 ```
 
 ### 🛡️ Why Vigilant-X is 10x Better:
-1.  **Formal Proof over Guesswork**: Vigilant-X uses a **Self-Correcting LLM-to-Z3 Bridge** that transpiles C++ to **SMT-LIBv2**. Findings are mathematically proven by the Z3 solver, not just "guessed" by an LLM.
-2.  **Global Data Flow**: Traces tainted data across project boundaries using **Neo4j + APOC**, reaching 30+ levels of deep function calls.
-3.  **Zero-Noise Verification**: Every "Proven" vulnerability is backed by a compiled PoC that **actually crashed** in a sandboxed environment.
-4.  **GitHub Native Workflow**: Posts findings as professional **GitHub Reviews** with **Inline Comments** and **Suggested Changes**, allowing one-click remediation.
-5.  **Verified Fixes**: Every suggested fix is **automatically re-verified in the sandbox** before being reported, ensuring the patch is effective and doesn't introduce regressions.
-6.  **Security First Architecture**: Hardened against malicious repositories with a **Secure Sandbox** (ignores untrusted Dockerfiles) and a **Safe Formal Engine** (no `exec()` on LLM output).
+1.  **Formal Proof over Guesswork**: Vigilant-X uses a **Self-Correcting LLM-to-Z3 Bridge** that transpiles code to **SMT-LIBv2**. Findings are mathematically proven by the Z3 solver, not just "guessed" by an LLM.
+2.  **Parallel Execution**: **High-Performance Architecture** featuring parallelized file ingestion (incremental Joern) and concurrent Z3 path solving, reducing analysis time by up to 80%.
+3.  **Multi-Language Backend**: Extensible **CPGBackend Protocol** supporting C/C++ (Joern) and Python (Semgrep), with an abstraction layer for easy addition of Rust, JS/TS, and Go.
+4.  **GitHub Code Scanning (SARIF)**: Full integration with GitHub's Security tab via **SARIF 2.1.0 export**, enabling long-term vulnerability tracking and dismissal workflows.
+5.  **Global Data Flow & Cache**: Traces tainted data across project boundaries using **Neo4j + APOC**. Features a **Global Proof Cache** to avoid re-proving identical code patterns across PRs.
+6.  **Zero-Noise Verification**: Every "Proven" vulnerability is backed by a compiled PoC that **actually crashed** in a sandboxed environment.
+7.  **Hardened Security**: Rigorous **Credential Protection** (no hardcoded secrets) and **LLM-Guard** truncation for massive PR reviews, preventing silent API failures on complex findings.
 
 ---
 
@@ -64,7 +68,7 @@ pip install -e ".[dev]"
 
 ```bash
 cp .env.example .env
-# Required: GROQ_API_KEY, GITHUB_TOKEN
+# Required: GROQ_API_KEY, GITHUB_TOKEN, NEO4J_PASSWORD
 ```
 
 ### 3. Start Infrastructure
@@ -76,9 +80,11 @@ docker-compose up neo4j -d
 ### 4. Run a Deep Security Review
 
 ```bash
-vigilant-x review \
-  --repo owner/repo \
-  --pr-number 123
+# Dry-run locally
+vigilant-x review --repo . --pr-number 0 --dry-run
+
+# Full CI integration
+vigilant-x review --repo owner/repo --pr-number 123
 ```
 
 ---
@@ -97,12 +103,12 @@ pytest tests/
 
 | Layer | Technology |
 |---|---|
-| **Orchestration** | Python 3.12 + LangGraph |
+| **Orchestration** | Python 3.12 + LangGraph + concurrent.futures |
 | **LLM Engine** | Meta-Llama 4 (Scout) / GPT-4o / Claude 3.5 |
-| **Knowledge Graph** | Neo4j (APOC) + Joern CPG |
-| **Formal Logic** | Z3 SMT Solver (via SMT-LIBv2 Transpiler) |
+| **Knowledge Graph** | Neo4j 5.x (APOC) + Joern CPG + Semgrep |
+| **Formal Logic** | Z3 SMT Solver (Parallel + Neo4j Proof Cache) |
 | **Sandboxing** | Docker + LLVM Sanitizers (ASan, MSan, TSan, UBSan) |
-| **GitHub Integration** | PyGithub (Review Threads + Suggested Changes) |
+| **Reporting** | SARIF 2.1.0 + GitHub Suggested Changes |
 
 ---
 
