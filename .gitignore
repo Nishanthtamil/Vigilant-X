@@ -1,7 +1,10 @@
 # Environment
 .env
 *.env.local
-.env.example
+# .env.example is intentionally committed — it contains no secrets
+
+# Benchmark scratch directory (generated at runtime)
+benchmarks/mock_repo/
 
 # Python
 __pycache__/

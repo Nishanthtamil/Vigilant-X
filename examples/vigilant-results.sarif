@@ -48,7 +48,7 @@
             }
           ],
           "partialFingerprints": {
-            "sourceHash": "76a69ae1-cddd-48"
+            "primaryLocationLineHash/v1": "76a69ae1-cddd-48"
           },
           "properties": {
             "confidence": 0.95,
@@ -92,7 +92,7 @@
             }
           ],
           "partialFingerprints": {
-            "sourceHash": "ba8ecd4a-d84a-4e"
+            "primaryLocationLineHash/v1": "ba8ecd4a-d84a-4e"
           },
           "properties": {
             "confidence": 0.95,
@@ -136,7 +136,7 @@
             }
           ],
           "partialFingerprints": {
-            "sourceHash": "8f25b29a-3e09-41"
+            "primaryLocationLineHash/v1": "8f25b29a-3e09-41"
           },
           "properties": {
             "confidence": 0.95,
@@ -180,7 +180,7 @@
             }
           ],
           "partialFingerprints": {
-            "sourceHash": "a8e9ed1d-1b1f-42"
+            "primaryLocationLineHash/v1": "a8e9ed1d-1b1f-42"
           },
           "properties": {
             "confidence": 0.95,
@@ -224,7 +224,7 @@
             }
           ],
           "partialFingerprints": {
-            "sourceHash": "6f35b822-70e9-46"
+            "primaryLocationLineHash/v1": "6f35b822-70e9-46"
           },
           "properties": {
             "confidence": 0.95,
@@ -268,7 +268,7 @@
             }
           ],
           "partialFingerprints": {
-            "sourceHash": "5ccaaca8-7551-47"
+            "primaryLocationLineHash/v1": "5ccaaca8-7551-47"
           },
           "properties": {
             "confidence": 0.95,
@@ -312,7 +312,7 @@
             }
           ],
           "partialFingerprints": {
-            "sourceHash": "8f2735b2-9183-4d"
+            "primaryLocationLineHash/v1": "8f2735b2-9183-4d"
           },
           "properties": {
             "confidence": 0.95,
@@ -356,7 +356,7 @@
             }
           ],
           "partialFingerprints": {
-            "sourceHash": "6c5886b7-a15f-47"
+            "primaryLocationLineHash/v1": "6c5886b7-a15f-47"
           },
           "properties": {
             "confidence": 0.95,

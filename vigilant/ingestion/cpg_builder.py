@@ -66,6 +66,13 @@ def close_driver() -> None:
 
 _schema_initialized = False
 
+
+def reset_schema_flag() -> None:
+    """Reset the schema initialization flag. Call this in test teardown when the
+    Neo4j database is wiped between tests."""
+    global _schema_initialized
+    _schema_initialized = False
+
 _SETUP_QUERIES = [
     # Constraints
     "CREATE CONSTRAINT cpg_node_unique IF NOT EXISTS FOR (n:CPGNode) REQUIRE n.node_id IS UNIQUE",

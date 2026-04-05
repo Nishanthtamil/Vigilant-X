@@ -92,9 +92,26 @@ class LLMClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception(lambda e: "rate_limit_exceeded" in str(e).lower() or "429" in str(e)),
+        retry=retry_if_exception(
+            lambda e: "rate_limit_exceeded" in str(e).lower() or "429" in str(e)
+        ),
         reraise=True,
     )
+    def _chat_with_retry(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+    ) -> str:
+        if self.provider == LLMProvider.GROQ:
+            return self._chat_groq(messages, temperature, max_tokens, json_mode)
+        elif self.provider == LLMProvider.OPENAI:
+            return self._chat_openai(messages, temperature, max_tokens, json_mode)
+        elif self.provider == LLMProvider.ANTHROPIC:
+            return self._chat_anthropic(messages, temperature, max_tokens, json_mode)
+        raise ValueError(f"Unknown provider: {self.provider}")
+
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -103,18 +120,15 @@ class LLMClient:
         json_mode: bool = False,
     ) -> str:
         try:
-            if self.provider == LLMProvider.GROQ:
-                return self._chat_groq(messages, temperature, max_tokens, json_mode)
-            elif self.provider == LLMProvider.OPENAI:
-                return self._chat_openai(messages, temperature, max_tokens, json_mode)
-            elif self.provider == LLMProvider.ANTHROPIC:
-                return self._chat_anthropic(messages, temperature, max_tokens, json_mode)
+            return self._chat_with_retry(messages, temperature, max_tokens, json_mode)
         except Exception as e:
             if "rate_limit_exceeded" in str(e).lower() or "429" in str(e):
-                logger.warning("LLMClient: Rate limit exceeded for %s after retries. Attempting fallback.", self.provider)
+                logger.warning(
+                    "LLMClient: %s rate-limited after retries. Falling back to next provider.",
+                    self.provider,
+                )
                 return self._fallback_chat(messages, temperature, max_tokens, json_mode)
-            raise e
-        raise ValueError(f"Unknown provider: {self.provider}")
+            raise
 
     def _fallback_chat(self, messages: list[dict[str, str]], temperature: float, max_tokens: int, json_mode: bool = False) -> str:
         # Try OpenAI if not already used
@@ -146,13 +160,12 @@ class LLMClient:
                 temp_client = Anthropic(api_key=self.settings.anthropic_api_key)
                 
                 system_content = ""
-                user_messages = [msg.copy() for msg in messages] # Deep copy to avoid mutating original
                 final_user_messages = []
-                for msg in user_messages:
+                for msg in messages:
                     if msg["role"] == "system":
                         system_content += msg["content"] + "\n"
                     else:
-                        final_user_messages.append(msg)
+                        final_user_messages.append(msg.copy())    # FIXED: copy
 
                 if json_mode and final_user_messages:
                     final_user_messages[-1]["content"] += "\n\nReturn ONLY a JSON object. No prose."
@@ -227,7 +240,7 @@ class LLMClient:
             if msg["role"] == "system":
                 system_content += msg["content"] + "\n"
             else:
-                user_messages.append(msg)
+                user_messages.append(msg.copy())
 
         if json_mode and user_messages:
             user_messages[-1]["content"] += "\n\nReturn ONLY a JSON object. No prose."
