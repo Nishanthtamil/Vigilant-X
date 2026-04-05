@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # ── Neo4j ─────────────────────────────────────────────────────────────────
     use_local_neo4j: bool = True
 
-    neo4j_local_uri: str = "bolt://localhost:7687"
+    neo4j_local_uri: str = "bolt://localhost:7688"
     neo4j_local_username: str = "neo4j"
     neo4j_local_password: str = "vigilant_local"
 
@@ -90,14 +90,19 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
 
+import threading
+
 # Singleton
 _settings: Settings | None = None
+_settings_lock = threading.Lock()
 
 
 def get_settings() -> Settings:
     global _settings
     if _settings is None:
-        _settings = Settings()
+        with _settings_lock:
+            if _settings is None:
+                _settings = Settings()
     return _settings
 
 

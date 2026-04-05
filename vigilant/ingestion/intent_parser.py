@@ -17,8 +17,10 @@ from vigilant.llm_schemas import PRIntentLLMResponse, APISurfaceLLMResponse
 
 logger = logging.getLogger(__name__)
 
+import threading
 from cachetools import LRUCache
 _surface_cache: LRUCache = LRUCache(maxsize=512)
+_cache_lock = threading.Lock()
 MAX_SURFACE_CALLS = 5
 import hashlib as _hs
 
@@ -136,8 +138,9 @@ class IntentParser:
                 return [], []
 
             key = _hs.sha256(raw_bytes).hexdigest()
-            if key in _surface_cache:
-                return _surface_cache[key]
+            with _cache_lock:
+                if key in _surface_cache:
+                    return _surface_cache[key]
 
             content_truncated = content[:4000]
             prompt = (
@@ -158,7 +161,8 @@ class IntentParser:
                 max_tokens=512,
             )
             result = (raw.sources, raw.sinks)
-            _surface_cache[key] = result
+            with _cache_lock:
+                _surface_cache[key] = result
             return result
         except Exception as e:
             logger.debug("IntentParser: API surface detection failed for %s: %s", file_path.name, e)

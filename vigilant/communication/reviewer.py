@@ -218,12 +218,57 @@ Provide the root cause explanation and a C++20/23 fix suggestion.
         vuln: Vulnerability, fix: Fix, poc_files: dict[str, PoCFile]
     ) -> PoCFile | None:
         """Create a PoCFile with the fix applied, for sandbox validation."""
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        
         original = poc_files.get(vuln.vuln_id)
         if not original or not fix.diff:
             return None
-        # Simple: append the fix diff as a comment (real patching would apply the diff)
-        fixed_content = original.content + f"\n// VERIFIED FIX:\n/*\n{fix.diff}\n*/\n"
-        return PoCFile(content=fixed_content, mocking_framework=original.mocking_framework)
+
+        # Try to apply the diff using the 'patch' command.
+        # This is more robust than simple appending, although it may still fail if
+        # the PoC structure doesn't match the diff's context.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            poc_file = tmp_path / "repro.cpp"
+            poc_file.write_text(original.content)
+            
+            diff_file = tmp_path / "fix.diff"
+            # Ensure diff has a trailing newline which 'patch' often expects
+            diff_text = fix.diff if fix.diff.endswith("\n") else fix.diff + "\n"
+            diff_file.write_text(diff_text)
+            
+            try:
+                # Use patch --forward --batch to avoid interactive prompts.
+                # Use -p1 to ignore 'a/' 'b/' prefixes. 
+                # We specify the file to patch directly to avoid filename mismatch issues.
+                result = subprocess.run(
+                    ["patch", "--forward", "--batch", "-p1", str(poc_file), str(diff_file)],
+                    capture_output=True, text=True, timeout=10
+                )
+                
+                if result.returncode == 0:
+                    fixed_content = poc_file.read_text()
+                    logger.info("Reviewer: successfully applied fix to PoC %s", vuln.vuln_id[:8])
+                    return PoCFile(content=fixed_content, mocking_framework=original.mocking_framework)
+                else:
+                    # If patch -p1 fails, try -p0 as a fallback
+                    result = subprocess.run(
+                        ["patch", "--forward", "--batch", "-p0", str(poc_file), str(diff_file)],
+                        capture_output=True, text=True, timeout=10
+                    )
+                    if result.returncode == 0:
+                        fixed_content = poc_file.read_text()
+                        return PoCFile(content=fixed_content, mocking_framework=original.mocking_framework)
+                    
+                    logger.debug("Reviewer: patch failed for %s: %s", vuln.vuln_id[:8], result.stderr)
+            except Exception as e:
+                logger.warning("Reviewer: patch command error for %s: %s", vuln.vuln_id[:8], e)
+
+        # If patching failed, we return None to indicate the fix couldn't be verified.
+        # This is safer than pretending a comment-appended PoC is 'verified'.
+        return None
 
     @staticmethod
     def _advisory_comment(vuln: Vulnerability) -> str:

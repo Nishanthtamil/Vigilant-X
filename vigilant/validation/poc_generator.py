@@ -187,6 +187,21 @@ Write a single-file GoogleTest repro that:
         witnesses = vuln.witness_values
         input_len = next((int(w.value) for w in witnesses if "length" in w.variable.lower()), 65)
 
+        # Signature templates for common sinks
+        templates = {
+            "memcpy": "memcpy(buf, input.data(), input.size());",
+            "memmove": "memmove(buf, input.data(), input.size());",
+            "strcpy": "strcpy(buf, input.data());",
+            "strncpy": "strncpy(buf, input.data(), 64);",
+            "strcat": "strcat(buf, input.data());",
+            "free": "free(input.data());",
+            "operator delete": "delete input.data();",
+            "system": "system(input.data());",
+            "popen": "popen(input.data(), \"r\");",
+            "SysFreeString": "SysFreeString((BSTR)input.data());",
+        }
+        call_code = templates.get(sink, f"{sink}(buf, input.data(), input.size());")
+
         return f"""
 #include <gtest/gtest.h>
 #include <cstring>
@@ -200,9 +215,12 @@ TEST(VigilantX, {sink.capitalize()}Overflow) {{
     // Z3 witness: input_length = {input_len} (overflows a 64-byte buffer)
     std::vector<char> input({input_len}, 'A');
     char buf[64];
+    memset(buf, 0, sizeof(buf));
+    
     // Vulnerable call:
-    {sink}(buf, input.data(), input.size());
-    // If ASan is active, the above line will trigger heap-buffer-overflow
+    {call_code}
+    
+    // If ASan is active, the above line will trigger a crash
     SUCCEED();
 }}
 

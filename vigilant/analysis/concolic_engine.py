@@ -151,6 +151,10 @@ class HeuristicPathPruner:
 
 from vigilant.ingestion.cpg_builder import CPGBuilder, get_driver
 
+# Global Z3 configuration
+z3.set_param("memory_max_size", 2048)  # Default limit, can be overridden if needed
+
+
 class Z3Solver:
     """
     Encodes a taint path as a Z3 formula and searches for a witness.
@@ -161,7 +165,8 @@ class Z3Solver:
     def __init__(self, memory_limit_mb: int | None = None, llm: LLMClient | None = None, builder: CPGBuilder | None = None) -> None:
         settings = get_settings()
         limit = memory_limit_mb or settings.z3_memory_limit_mb
-        z3.set_param("memory_max_size", limit)
+        # Use a lock if we really must set it per-instance, but better to set it once.
+        # For now, we'll just log it and assume the global set is sufficient.
         self.builder = builder or CPGBuilder()
         self.llm = llm
         logger.debug("Z3Solver: memory limit = %d MB", limit)
@@ -278,22 +283,60 @@ class Z3Solver:
             # Simple buffer overflow model: input_len > dest_size
             dest_size = z3.Int("dest_size")
             input_len = z3.Int("input_len")
-            
-            # Try to extract sizes from code or use defaults
-            # (In a real system, we'd pull these from the CPG node properties)
-            constraints = [input_len > dest_size, dest_size > 0, input_len > 0]
+
+            # Heuristic: try to extract sizes from code
+            # Example: memcpy(dest, src, 1024) -> input_len=1024
+            # Example: char buf[64] -> dest_size=64
+            actual_input_len = None
+            actual_dest_size = None
+
+            # Extract input_len from 3rd argument if it's a literal
+            len_match = re.search(r",\s*(\d+)\s*\)", sink_code)
+            if len_match:
+                actual_input_len = int(len_match.group(1))
+
+            # Extract dest_size from something like buf[128] if it appears in the code snippet
+            size_match = re.search(r"\[(\d+)\]", sink_code)
+            if size_match:
+                actual_dest_size = int(size_match.group(1))
+
+            constraints = [dest_size > 0, input_len > 0]
+            if actual_input_len is not None:
+                constraints.append(input_len == actual_input_len)
+            if actual_dest_size is not None:
+                constraints.append(dest_size == actual_dest_size)
+            else:
+                # Default dest_size to a reasonable value if not found, to avoid trivial SAT
+                constraints.append(dest_size == 64)
+
+            constraints.append(input_len > dest_size)
+
             formula_parts = ["input_len > dest_size"]
+            if actual_input_len: formula_parts.append(f"input_len == {actual_input_len}")
+            if actual_dest_size: formula_parts.append(f"dest_size == {actual_dest_size}")
+
             sym_vars = {"dest_size": dest_size, "input_len": input_len}
             return sym_vars, constraints, formula_parts
 
         if sink_name in ("strcpy", "strcat", "gets"):
             input_len = z3.Int("input_len")
             dest_size = z3.Int("dest_size")
-            constraints = [input_len >= dest_size, dest_size > 0]
+
+            actual_dest_size = None
+            size_match = re.search(r"\[(\d+)\]", sink_code)
+            if size_match:
+                actual_dest_size = int(size_match.group(1))
+
+            constraints = [input_len > 0, dest_size > 0]
+            if actual_dest_size is not None:
+                constraints.append(dest_size == actual_dest_size)
+            else:
+                constraints.append(dest_size == 64)
+
+            constraints.append(input_len >= dest_size)
             formula_parts = ["input_len >= dest_size"]
             sym_vars = {"dest_size": dest_size, "input_len": input_len}
             return sym_vars, constraints, formula_parts
-
         # ── 2. LLM-based Transpilation (Fallback) ───────────────────────────
         # If no LLM configured, fallback to basic reachability
         if not self.llm:

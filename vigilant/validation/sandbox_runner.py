@@ -105,16 +105,11 @@ class SandboxRunner:
                 project_compiler = compiler_info.get("compiler", "g++")
                 is_override = (compiler_override != project_compiler)
 
-                # Use relative paths for the container: working_dir is /workspace/build
-                container_src = poc.file_name
-                container_bin = "./repro"
-
-                full_cmd = compile_cmd + ["-o", container_bin, container_src]
-                run_cmd = [container_bin]
+                run_cmd = ["./repro"]
 
                 current_result = self._run_in_docker(
                     tmp_path,
-                    compile_cmd=full_cmd,
+                    compile_cmd=compile_cmd,
                     run_cmd=run_cmd,
                     compiler_override=is_override, 
                 )
@@ -229,22 +224,25 @@ class SandboxRunner:
     # ── Build helpers ─────────────────────────────────────────────────────────
 
     def _build_compile_cmd(
-        self, src: Path, compiler_info: dict, poc_content: str = "", sanitizer: str = "address,undefined", 
+        self, src: Path, compiler_info: dict, poc_content: str = "", sanitizer: str = "address,undefined",
         extra_flags: list[str] | None = None, opt_level: str = "-O1", compiler_override: str = "clang++"
     ) -> list[str]:
         # Always prefer clang++ for sanitizer compatibility; g++ for cross-verification if available
         compiler = compiler_override
-        
+
         # MSan requires track-origins for better debugging
         flags = [f"-fsanitize={sanitizer}", "-fno-omit-frame-pointer", "-g", opt_level]
         if sanitizer == "memory":
             flags.append("-fsanitize-memory-track-origins")
-            
-        cmd = [compiler, "-std=c++20"] + flags + (extra_flags or []) + ["-lgtest", "-lpthread"]
+
+        # The src Path is within the temp directory, which is mounted to /workspace/build in the container.
+        # Inside the container, it's just src.name.
+        container_src = src.name
+
+        cmd = [compiler, "-std=c++20", container_src] + flags + (extra_flags or []) + ["-lgtest", "-lpthread", "-o", "repro"]
         if "int main(" not in poc_content:
             cmd.append("-lgtest_main")
         return cmd
-
 
     def _resolve_image(self) -> str:
         """

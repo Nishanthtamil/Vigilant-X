@@ -31,25 +31,30 @@ from vigilant.models import CPGNode, CPGSummary
 
 logger = logging.getLogger(__name__)
 
+import threading
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Neo4j helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 _driver: Driver | None = None
+_driver_lock = threading.Lock()
 
 
 def get_driver() -> Driver:
     global _driver
     if _driver is None:
-        settings = get_settings()
-        _driver = GraphDatabase.driver(
-            settings.neo4j_uri,
-            auth=(settings.neo4j_username, settings.neo4j_password),
-            max_connection_pool_size=50,
-            connection_timeout=30,
-            max_transaction_retry_time=15,
-        )
-        logger.info("Neo4j driver connected to %s", settings.neo4j_uri)
+        with _driver_lock:
+            if _driver is None:
+                settings = get_settings()
+                _driver = GraphDatabase.driver(
+                    settings.neo4j_uri,
+                    auth=(settings.neo4j_username, settings.neo4j_password),
+                    max_connection_pool_size=50,
+                    connection_timeout=30,
+                    max_transaction_retry_time=15,
+                )
+                logger.info("Neo4j driver connected to %s", settings.neo4j_uri)
     return _driver
 
 
@@ -184,10 +189,11 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
     """
     import re
 
-    SOURCES = {"argv", "scanf", "fgets", "read", "fread", "recv", "gets", "getenv"}
+    SOURCES = {"argv", "scanf", "fgets", "read", "fread", "recv", "gets", "getenv", "SysAllocString", "SysAllocStringLen"}
     SINKS   = {
         "memcpy", "strcpy", "strcat", "sprintf", "vsprintf",
         "free", "memset", "memmove", "strncpy", "system", "delete",
+        "SysFreeString", "CopyTo", "Attach", "Detach", "operator delete",
     }
 
     target_files = files or [
@@ -333,9 +339,10 @@ class CPGBuilder:
     ) -> CPGSummary:
         """Entry point for PR-scoped or full codebase ingestion."""
         run_id = uuid.uuid4().hex
-        if force_full or not self._has_existing_cpg():
-            return self._full_parse(repo_path, run_id=run_id)
-        
+        repo_id = str(repo_path.resolve())
+        if force_full or not self._has_existing_cpg(repo_id):
+            return self._full_parse(repo_path, run_id=run_id, repo_id=repo_id)
+
         from vigilant.ingestion.backends import get_backend
         # Group files by backend type for efficient batching
         by_backend: dict[str, tuple[Any, list[str]]] = {}
@@ -346,19 +353,18 @@ class CPGBuilder:
             if backend_name not in by_backend:
                 by_backend[backend_name] = (backend, [])
             by_backend[backend_name][1].append(f)
-        
+
         # Process each group
         total = CPGSummary(ingestion_mode="incremental")
         for backend_name, (backend, files) in by_backend.items():
             logger.info("CPG: Using backend %s for files: %s", backend_name, files)
-            result = self._incremental_update(repo_path, files, backend=backend, run_id=run_id)
+            result = self._incremental_update(repo_path, files, backend=backend, run_id=run_id, repo_id=repo_id)
             total.nodes_created += result.nodes_created
             total.edges_created += result.edges_created
         return total
-
     # ── Full parse ────────────────────────────────────────────────────────────
 
-    def _full_parse(self, repo_path: Path, run_id: str) -> CPGSummary:
+    def _full_parse(self, repo_path: Path, run_id: str, repo_id: str = "") -> CPGSummary:
         raw_cpg = _run_joern(repo_path)
         nodes = raw_cpg.get("nodes", [])
         edges = raw_cpg.get("edges", [])
@@ -369,7 +375,7 @@ class CPGBuilder:
             local_id = str(node_data.get("node_id", ""))
             rel_path = node_data.get("file_path", "")
             if local_id:
-                global_id = hashlib.sha256(f"{rel_path}:{local_id}".encode()).hexdigest()
+                global_id = hashlib.sha256(f"{repo_id}:{rel_path}:{local_id}".encode()).hexdigest()
                 id_map[local_id] = global_id
                 node_data["node_id"] = global_id
 
@@ -383,11 +389,6 @@ class CPGBuilder:
 
         created = 0
         with self.driver.session() as session:
-            # Delete only nodes NOT belonging to the current run
-            session.run(
-                "MATCH (n:CPGNode) WHERE n.run_id <> $rid OR n.run_id IS NULL DETACH DELETE n",
-                rid=run_id,
-            )
             for node_data in nodes:
                 code_text = node_data.get("code", "")
                 content_hash = hash_function_content(code_text)
@@ -402,7 +403,8 @@ class CPGBuilder:
                         node_type: $node_type,
                         code: $code,
                         content_hash: $content_hash,
-                        run_id: $rid
+                        run_id: $rid,
+                        repo_id: $repo_id
                     }
                     """,
                     node_id=node_data.get("node_id", str(uuid.uuid4())),
@@ -414,10 +416,18 @@ class CPGBuilder:
                     code=code_text,
                     content_hash=content_hash,
                     rid=run_id,
+                    repo_id=repo_id,
                 )
                 created += 1
 
             edge_count = self._write_edges(session, edges)
+
+            # Delete stale nodes for THIS repository only
+            session.run(
+                "MATCH (n:CPGNode) WHERE n.repo_id = $repo_id AND n.run_id <> $rid DETACH DELETE n",
+                rid=run_id,
+                repo_id=repo_id,
+            )
 
         return CPGSummary(
             nodes_created=created,
@@ -427,14 +437,14 @@ class CPGBuilder:
 
     # ── Incremental update ────────────────────────────────────────────────────
 
-    def _incremental_update(self, repo_path: Path, changed_files: list[str], backend: Any = None, run_id: str = "") -> CPGSummary:
+    def _incremental_update(self, repo_path: Path, changed_files: list[str], backend: Any = None, run_id: str = "", repo_id: str = "") -> CPGSummary:
         created = edge_count = 0
         from vigilant.ingestion.backends import JoernBackend
         if backend is None:
             backend = JoernBackend()
 
         def _process(rel_path: str) -> tuple[int, int]:
-            self._delete_file_nodes(rel_path)
+            self._delete_file_nodes(rel_path, repo_id)
             abs_path = repo_path / rel_path
             if not abs_path.exists():
                 return 0, 0
@@ -445,7 +455,7 @@ class CPGBuilder:
             for nd in nodes_data:
                 local_id = str(nd.get("node_id", ""))
                 if local_id:
-                    global_id = hashlib.sha256(f"{rel_path}:{local_id}".encode()).hexdigest()
+                    global_id = hashlib.sha256(f"{repo_id}:{rel_path}:{local_id}".encode()).hexdigest()
                     id_map[local_id] = global_id
                     nd["node_id"] = global_id
             for e in raw.get("edges", []):
@@ -458,11 +468,11 @@ class CPGBuilder:
                     session.run(
                         "MERGE (n:CPGNode {node_id:$nid}) SET n += {file_path:$fp,"
                         "function_name:$fn,line_start:$ls,line_end:$le,node_type:$nt,"
-                        "code:$code,content_hash:$ch,run_id:$rid}",
+                        "code:$code,content_hash:$ch,run_id:$rid,repo_id:$repo_id}",
                         nid=nd.get("node_id", str(uuid.uuid4())), fp=rel_path,
                         fn=nd.get("function_name",""), ls=int(nd.get("line_start",0)),
                         le=int(nd.get("line_end",0)), nt=nd.get("node_type","AST_FUNC"),
-                        code=code, ch=hash_function_content(code), rid=run_id,
+                        code=code, ch=hash_function_content(code), rid=run_id, repo_id=repo_id,
                     )
                     n_count += 1
                 e_count = self._write_edges(session, raw.get("edges", []))
@@ -483,17 +493,17 @@ class CPGBuilder:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _has_existing_cpg(self) -> bool:
+    def _has_existing_cpg(self, repo_id: str) -> bool:
         with self.driver.session() as session:
-            result = session.run("MATCH (n:CPGNode) RETURN count(n) AS cnt")
+            result = session.run("MATCH (n:CPGNode {repo_id: $rid}) RETURN count(n) AS cnt", rid=repo_id)
             record = result.single()
             return bool(record and record["cnt"] > 0)
 
-    def _delete_file_nodes(self, file_path: str) -> None:
+    def _delete_file_nodes(self, file_path: str, repo_id: str) -> None:
         with self.driver.session() as session:
             session.run(
-                "MATCH (n:CPGNode {file_path: $fp}) DETACH DELETE n",
-                fp=file_path,
+                "MATCH (n:CPGNode {file_path: $fp, repo_id: $rid}) DETACH DELETE n",
+                fp=file_path, rid=repo_id,
             )
         logger.info("CPG: deleted nodes for removed file %s", file_path)
 

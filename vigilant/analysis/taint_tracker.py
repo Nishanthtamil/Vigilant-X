@@ -330,7 +330,7 @@ LIMIT 100
         for path in paths:
             for rule in self.code_law.rules:
                 if any(
-                    sink_kw in path.sink.function_name
+                    sink_kw.replace("call:", "") in path.sink.function_name
                     for sink_kw in rule.pattern.split("|")
                     if sink_kw.startswith("call:")
                 ):
