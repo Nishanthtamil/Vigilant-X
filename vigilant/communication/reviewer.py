@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 from vigilant.llm_client import LLMClient
 from vigilant.models import (
     Fix,
+    PRIntent,
     PoCFile,
     ReviewReport,
     SandboxResult,
@@ -78,10 +80,15 @@ class Reviewer:
         vulnerabilities: list[Vulnerability],
         sandbox_results: dict[str, SandboxResult],
         poc_files: dict[str, PoCFile],
+        repo_path: Path | None = None,
+        pr_intent: PRIntent | None = None,
     ) -> ReviewReport:
         """Generate the full ReviewReport for a PR."""
         fixes: dict[str, Fix] = {}
         advisory_comments: list[str] = []
+
+        # ── Generate PR walkthrough summary ───────────────────────────────────
+        walkthrough = self._generate_walkthrough(pr_intent) if pr_intent else ""
 
         # ── Filter to reportable vulns ────────────────────────────────────────
         reportable_statuses = {
@@ -104,7 +111,7 @@ class Reviewer:
             fix = self._generate_fix(vuln, sandbox_res)
             # Run the fix through the sandbox to confirm it's clean
             if self.sandbox_runner and fix.diff:
-                fix_poc = self._make_fix_poc(vuln, fix, poc_files)
+                fix_poc = self._make_fix_poc(vuln, fix, poc_files, repo_path=repo_path)
                 if fix_poc:
                     fix.fix_sandbox_result = self.sandbox_runner.run(vuln, fix_poc)
             fixes[vuln.vuln_id] = fix
@@ -116,7 +123,8 @@ class Reviewer:
 
         # ── Compose full markdown body ────────────────────────────────────────
         markdown_body = self._compose_markdown(
-            verified_vulns, fixes, sandbox_results, advisory_comments
+            verified_vulns, fixes, sandbox_results, advisory_comments,
+            walkthrough=walkthrough,
         )
 
         return ReviewReport(
@@ -127,6 +135,7 @@ class Reviewer:
             fixes=fixes,
             advisory_comments=advisory_comments,
             markdown_body=markdown_body,
+            walkthrough_summary=walkthrough,
         )
 
     # ── Fix generation ────────────────────────────────────────────────────────
@@ -215,59 +224,74 @@ Provide the root cause explanation and a C++20/23 fix suggestion.
 
     @staticmethod
     def _make_fix_poc(
-        vuln: Vulnerability, fix: Fix, poc_files: dict[str, PoCFile]
+        vuln: Vulnerability, fix: Fix, poc_files: dict[str, PoCFile],
+        repo_path: Path | None = None,
     ) -> PoCFile | None:
-        """Create a PoCFile with the fix applied, for sandbox validation."""
+        """Create a PoCFile with the fix applied, for sandbox validation.
+
+        The LLM-generated diff is against the *original source file*, not
+        the PoC (repro.cpp).  We apply the diff to the actual source file
+        in the repo, then compile the patched source alongside the PoC.
+        """
+        import shutil
         import subprocess
         import tempfile
-        from pathlib import Path
-        
+
         original = poc_files.get(vuln.vuln_id)
-        if not original or not fix.diff:
+        if not original or not fix.diff or not fix.file_path:
             return None
 
-        # Try to apply the diff using the 'patch' command.
-        # This is more robust than simple appending, although it may still fail if
-        # the PoC structure doesn't match the diff's context.
+        # Resolve the source file the diff targets
+        if repo_path:
+            source_file = repo_path / fix.file_path
+        else:
+            source_file = Path(fix.file_path)
+
+        if not source_file.exists():
+            logger.debug("Reviewer: source file %s not found for fix patching", source_file)
+            return None
+
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
-            poc_file = tmp_path / "repro.cpp"
-            poc_file.write_text(original.content)
-            
+
+            # Copy the source file into a temp dir so we don't mutate the repo
+            tmp_source = tmp_path / source_file.name
+            shutil.copy2(source_file, tmp_source)
+
             diff_file = tmp_path / "fix.diff"
-            # Ensure diff has a trailing newline which 'patch' often expects
             diff_text = fix.diff if fix.diff.endswith("\n") else fix.diff + "\n"
             diff_file.write_text(diff_text)
-            
+
             try:
-                # Use patch --forward --batch to avoid interactive prompts.
-                # Use -p1 to ignore 'a/' 'b/' prefixes. 
-                # We specify the file to patch directly to avoid filename mismatch issues.
-                result = subprocess.run(
-                    ["patch", "--forward", "--batch", "-p1", str(poc_file), str(diff_file)],
-                    capture_output=True, text=True, timeout=10
-                )
-                
-                if result.returncode == 0:
-                    fixed_content = poc_file.read_text()
-                    logger.info("Reviewer: successfully applied fix to PoC %s", vuln.vuln_id[:8])
-                    return PoCFile(content=fixed_content, mocking_framework=original.mocking_framework)
-                else:
-                    # If patch -p1 fails, try -p0 as a fallback
+                # Try -p1 first (handles a/ b/ prefixes), then -p0 fallback
+                for strip_level in ("-p1", "-p0"):
                     result = subprocess.run(
-                        ["patch", "--forward", "--batch", "-p0", str(poc_file), str(diff_file)],
-                        capture_output=True, text=True, timeout=10
+                        ["patch", "--forward", "--batch", strip_level,
+                         str(tmp_source), str(diff_file)],
+                        capture_output=True, text=True, timeout=10,
                     )
                     if result.returncode == 0:
-                        fixed_content = poc_file.read_text()
-                        return PoCFile(content=fixed_content, mocking_framework=original.mocking_framework)
-                    
-                    logger.debug("Reviewer: patch failed for %s: %s", vuln.vuln_id[:8], result.stderr)
-            except Exception as e:
-                logger.warning("Reviewer: patch command error for %s: %s", vuln.vuln_id[:8], e)
+                        # Build a combined PoC: original harness + patched source
+                        patched_source = tmp_source.read_text()
+                        fixed_content = (
+                            f"// Patched source ({source_file.name}):\n"
+                            f"{patched_source}\n\n"
+                            f"// Original PoC harness:\n"
+                            f"{original.content}"
+                        )
+                        logger.info("Reviewer: applied fix to %s for vuln %s",
+                                    source_file.name, vuln.vuln_id[:8])
+                        return PoCFile(
+                            content=fixed_content,
+                            mocking_framework=original.mocking_framework,
+                        )
 
-        # If patching failed, we return None to indicate the fix couldn't be verified.
-        # This is safer than pretending a comment-appended PoC is 'verified'.
+                logger.debug("Reviewer: patch failed for %s: %s",
+                             vuln.vuln_id[:8], result.stderr)
+            except Exception as e:
+                logger.warning("Reviewer: patch command error for %s: %s",
+                               vuln.vuln_id[:8], e)
+
         return None
 
     @staticmethod
@@ -280,15 +304,50 @@ Provide the root cause explanation and a C++20/23 fix suggestion.
 
     # ── Markdown composer ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _generate_walkthrough(pr_intent: PRIntent) -> str:
+        """Format the PRIntent into a plain-English walkthrough summary."""
+        parts: list[str] = [
+            "## 📋 PR Walkthrough",
+            "",
+            f"> {pr_intent.purpose}",
+            "",
+        ]
+
+        if pr_intent.changed_modules:
+            parts.append("**Changed areas:**")
+            for mod in pr_intent.changed_modules:
+                parts.append(f"- `{mod}`")
+            parts.append("")
+
+        if pr_intent.risk_areas:
+            parts.append("**Potential risk areas:**")
+            for risk in pr_intent.risk_areas:
+                parts.append(f"- ⚠️ {risk}")
+            parts.append("")
+
+        if pr_intent.code_law_violations_suspected:
+            parts.append("**Suspected Code Law violations:**")
+            for v in pr_intent.code_law_violations_suspected:
+                parts.append(f"- 🔍 {v}")
+            parts.append("")
+
+        return "\n".join(parts)
+
     def _compose_markdown(
         self,
         verified: list[Vulnerability],
         fixes: dict[str, Fix],
         sandbox_results: dict[str, SandboxResult],
         advisory_comments: list[str],
+        walkthrough: str = "",
     ) -> str:
+        # Always start with walkthrough if available
+        prefix = f"{walkthrough}\n\n" if walkthrough else ""
+
         if not verified and not advisory_comments:
             return (
+                f"{prefix}"
                 "## ✅ Vigilant-X: No Issues Found\n\n"
                 "All taint paths were analyzed. No verified vulnerabilities detected."
             )

@@ -39,12 +39,12 @@ RUN cd /usr/src/googletest && \
 FROM toolchain AS orchestrator
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 python3.12-dev python3-pip \
+    python3.12 python3.12-dev python3.12-venv patch \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e ".[dev]"
+RUN python3.12 -m pip install --no-cache-dir --break-system-packages -e ".[dev]"
 
 COPY vigilant/ vigilant/
 COPY code_law/ code_law/

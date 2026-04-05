@@ -55,7 +55,7 @@ class TestZ3Solver:
     def test_memcpy_path_returns_proven(self, mocker):
         mock_builder = mocker.Mock()
         mock_builder.get_node.return_value = {}
-        solver = Z3Solver(memory_limit_mb=512, builder=mock_builder) # No LLM provided, should use fallback
+        solver = Z3Solver(builder=mock_builder)  # No LLM provided, should use fallback
         path = _make_path(snk_func="memcpy")
         status, witnesses, formula = solver.solve(path)
         assert status == VulnerabilityStatus.PROVEN
@@ -65,7 +65,7 @@ class TestZ3Solver:
     def test_free_path_returns_proven(self, mocker):
         mock_builder = mocker.Mock()
         mock_builder.get_node.return_value = {}
-        solver = Z3Solver(memory_limit_mb=512, builder=mock_builder)
+        solver = Z3Solver(builder=mock_builder)
         path = _make_path(snk_func="free")
         status, witnesses, formula = solver.solve(path)
         assert status == VulnerabilityStatus.PROVEN
@@ -74,15 +74,15 @@ class TestZ3Solver:
     def test_formula_is_populated(self, mocker):
         mock_builder = mocker.Mock()
         mock_builder.get_node.return_value = {}
-        solver = Z3Solver(memory_limit_mb=512, builder=mock_builder)
+        solver = Z3Solver(builder=mock_builder)
         path = _make_path(snk_func="strcpy")
         status, witnesses, formula = solver.solve(path)
         assert formula == "sink_is_reachable"
 
-    def test_memory_limit_set(self, mocker):
-        """Z3 should be initialised without error at a low limit."""
+    def test_z3_solver_init(self, mocker):
+        """Z3Solver should be constructable without error."""
         mock_builder = mocker.Mock()
-        solver = Z3Solver(memory_limit_mb=256, builder=mock_builder)
+        solver = Z3Solver(builder=mock_builder)
         assert solver is not None
 
 
@@ -122,7 +122,7 @@ class TestConcolicEngine:
         engine.llm = None
         engine.builder = mocker.Mock()
         engine.pruner = HeuristicPathPruner(llm=None)
-        engine.z3_solver = Z3Solver(memory_limit_mb=256, builder=engine.builder)
+        engine.z3_solver = Z3Solver(builder=engine.builder)
         engine.fuzzer = None  # type: ignore[assignment]
 
         advisory = _make_path(severity="ADVISORY")
@@ -139,7 +139,7 @@ class TestConcolicEngine:
         engine.builder.driver.session.side_effect = Exception("Neo4j down")
         
         engine.pruner = HeuristicPathPruner(llm=None)
-        engine.z3_solver = Z3Solver(memory_limit_mb=256, builder=engine.builder)
+        engine.z3_solver = Z3Solver(builder=engine.builder)
         engine.fuzzer = None  # type: ignore[assignment]
 
         critical = _make_path(snk_func="memcpy", severity="CRITICAL")

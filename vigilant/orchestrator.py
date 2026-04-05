@@ -243,6 +243,8 @@ def node_communicate(state: dict[str, Any]) -> dict[str, Any]:
             vulnerabilities=agent.vulnerabilities,
             sandbox_results=agent.sandbox_results,
             poc_files=agent.poc_files,
+            repo_path=repo_path,
+            pr_intent=agent.pr_intent,
         )
 
         commenter = PRCommenter()

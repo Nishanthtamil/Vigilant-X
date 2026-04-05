@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "Vigilant-X",
+          "version": "0.1.0",
+          "informationUri": "https://github.com/nishanth/Vigilant-X"
+        }
+      },
+      "results": [
+        {
+          "ruleId": "vigilant-x/memory-safety",
+          "level": "error",
+          "message": {
+            "text": "[VulnerabilityStatus.PROVEN] FillMyString reachable from SysAllocString (ComBSTRDemo/main.cpp \u2192 ComBSTRDemo/main.cpp)"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "ComBSTRDemo/main.cpp",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 23
+                }
+              }
+            }
+          ],
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "taint source"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "ComBSTRDemo/main.cpp",
+                  "uriBaseId": "%SRCROOT%"
+                },
+                "region": {
+                  "startLine": 21
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "primaryLocationLineHash/v1": "26209958289a3610ada8f8bfa133179c"
+          },
+          "properties": {
+            "confidence": 0.95,
+            "z3Proof": "FillMyString_is_reachable"
+          }
+        }
+      ]
+    }
+  ]
+}

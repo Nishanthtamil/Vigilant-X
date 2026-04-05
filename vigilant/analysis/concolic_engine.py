@@ -151,8 +151,8 @@ class HeuristicPathPruner:
 
 from vigilant.ingestion.cpg_builder import CPGBuilder, get_driver
 
-# Global Z3 configuration
-z3.set_param("memory_max_size", 2048)  # Default limit, can be overridden if needed
+# Global Z3 configuration — memory limits are process-global in Z3
+z3.set_param("memory_max_size", 2048)
 
 
 class Z3Solver:
@@ -162,14 +162,9 @@ class Z3Solver:
     Memory-limited via z3.set_param to prevent OOM in containerised environments.
     """
 
-    def __init__(self, memory_limit_mb: int | None = None, llm: LLMClient | None = None, builder: CPGBuilder | None = None) -> None:
-        settings = get_settings()
-        limit = memory_limit_mb or settings.z3_memory_limit_mb
-        # Use a lock if we really must set it per-instance, but better to set it once.
-        # For now, we'll just log it and assume the global set is sufficient.
+    def __init__(self, llm: LLMClient | None = None, builder: CPGBuilder | None = None) -> None:
         self.builder = builder or CPGBuilder()
         self.llm = llm
-        logger.debug("Z3Solver: memory limit = %d MB", limit)
 
     def _cache_key(self, path: TaintPath) -> str:
         src_node = self.builder.get_node(path.source.node_id)

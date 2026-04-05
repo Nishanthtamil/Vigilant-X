@@ -161,6 +161,7 @@ class ReviewReport(BaseModel):
     fixes: dict[str, Fix] = Field(default_factory=dict)   # keyed by vuln_id
     advisory_comments: list[str] = Field(default_factory=list)
     markdown_body: str = ""
+    walkthrough_summary: str = ""
     posted_comment_url: str = ""
 
 
