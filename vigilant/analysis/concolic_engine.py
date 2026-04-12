@@ -782,7 +782,7 @@ class ConcolicEngine:
         """Parser for LLM-generated JSON deep scan findings."""
         try:
             try:
-                rel_path = str(file_path.relative_to(repo_path)) if repo_path else str(file_path)
+                rel_path = file_path.relative_to(repo_path).as_posix() if repo_path else str(file_path)
             except ValueError:
                 rel_path = str(file_path)
 

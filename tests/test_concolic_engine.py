@@ -54,30 +54,30 @@ def _make_path(
 class TestZ3Solver:
     def test_memcpy_path_returns_proven(self, mocker):
         mock_builder = mocker.Mock()
-        mock_builder.get_node.return_value = {}
+        mock_builder.get_node.return_value = {"code": "char dest[64]; memcpy(dest, src, 1024);"}
         solver = Z3Solver(builder=mock_builder)  # No LLM provided, should use fallback
         path = _make_path(snk_func="memcpy")
         status, witnesses, formula = solver.solve(path)
         assert status == VulnerabilityStatus.PROVEN
-        # Fallback uses basic reachability
-        assert formula == "sink_is_reachable"
+        # Fallback uses real Z3 constraints
+        assert "input_len" in formula or "dest_size" in formula
 
     def test_free_path_returns_proven(self, mocker):
         mock_builder = mocker.Mock()
-        mock_builder.get_node.return_value = {}
+        mock_builder.get_node.return_value = {"code": "free(p);"}
         solver = Z3Solver(builder=mock_builder)
         path = _make_path(snk_func="free")
         status, witnesses, formula = solver.solve(path)
         assert status == VulnerabilityStatus.PROVEN
-        assert formula == "sink_is_reachable"
+        assert "is_freed" in formula
 
     def test_formula_is_populated(self, mocker):
         mock_builder = mocker.Mock()
-        mock_builder.get_node.return_value = {}
+        mock_builder.get_node.return_value = {"code": "strcpy(dest, src);"}
         solver = Z3Solver(builder=mock_builder)
         path = _make_path(snk_func="strcpy")
         status, witnesses, formula = solver.solve(path)
-        assert formula == "sink_is_reachable"
+        assert "input_len" in formula or "dest_size" in formula
 
     def test_z3_solver_init(self, mocker):
         """Z3Solver should be constructable without error."""
@@ -146,3 +146,4 @@ class TestConcolicEngine:
         vulns = engine.analyze([critical])
         assert len(vulns) == 1
         assert vulns[0].status in {VulnerabilityStatus.PROVEN, VulnerabilityStatus.WARNING}
+
