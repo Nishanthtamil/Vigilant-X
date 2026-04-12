@@ -47,6 +47,11 @@ def _run_semgrep(
     try:
         raw = json.loads(Path(out_path).read_text())
     except Exception:
+        raw = {}
+    finally:
+        Path(out_path).unlink(missing_ok=True)
+
+    if not raw:
         return {"nodes": [], "edges": []}
 
     nodes = []

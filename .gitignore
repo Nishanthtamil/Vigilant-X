@@ -53,3 +53,7 @@ workspace/
 joern-workspace/
 scripts/*.bin
 scripts/*.cpg
+
+# Results
+vigilant-results.sarif
+**/vigilant-results.sarif

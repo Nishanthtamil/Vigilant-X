@@ -103,7 +103,7 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
         if ctx:
             def _to_relative(p: str, base: Path) -> str:
                 try:
-                    return str(Path(p).relative_to(base))
+                    return Path(p).relative_to(base).as_posix()
                 except ValueError:
                     return p
 
