@@ -107,28 +107,48 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
                 except ValueError:
                     return p
 
-            # Identify files that ALREADY have vulnerabilities from taint tracking
-            files_with_vulns = {_to_relative(v.taint_path.sink.file_path, repo_path) for v in vulns}
-            
-            files_to_scan = ctx.changed_files if ctx.changed_files else [str(f.relative_to(repo_path)) for f in repo_path.glob("**/*") if f.is_file() and f.suffix in (".cpp", ".cc", ".c", ".h", ".hpp", ".py")]
+            # Files already covered by graph-based taint tracking — skip Deep Scan for these.
+            # Normalize to repo-relative POSIX strings for reliable comparison.
+            files_with_taint_vulns = set()
+            for v in vulns:
+                raw = v.taint_path.sink.file_path
+                norm = _to_relative(raw, repo_path) if repo_path else raw
+                files_with_taint_vulns.add(norm)
+
+            files_to_scan = (
+                ctx.changed_files
+                if ctx.changed_files
+                else [
+                    str(f.relative_to(repo_path))
+                    for f in repo_path.glob("**/*")
+                    if f.is_file() and f.suffix in (".cpp", ".cc", ".c", ".h", ".hpp", ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs")
+                ]
+            )
+
             logger.info("[Analysis] Files for Deep Scan: %s", files_to_scan)
-            
+
             def _run_deep_scan(args):
                 f_rel, f_path, rules = args
                 return engine.deep_scan(f_path, rules, repo_path=repo_path)
 
             scan_args = []
             for f_rel in files_to_scan:
-                # SKIP Deep Scan if we already found a vulnerability in this file via taint tracking
-                if f_rel in files_with_vulns:
-                    logger.info("[Analysis] Skipping Deep Scan for %s (already has findings)", f_rel)
+                # Normalize the candidate path the same way files_with_taint_vulns was built
+                f_rel_norm = _to_relative(str(repo_path / f_rel), repo_path) if repo_path else f_rel
+
+                # Skip if taint tracking already found something in this file
+                if f_rel_norm in files_with_taint_vulns:
+                    logger.info(
+                        "[Analysis] Skipping Deep Scan for %s (taint tracker already has findings)",
+                        f_rel,
+                    )
                     continue
 
                 f_path = repo_path / f_rel
                 if not f_path.exists():
                     logger.warning("[Analysis] Deep Scan: file not found %s", f_path)
                     continue
-                
+
                 matching_rules = code_law.rules_for_file(f_rel)
                 if matching_rules:
                     scan_args.append((f_rel, f_path, matching_rules))
@@ -136,15 +156,43 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
             if scan_args:
                 logger.info("[Analysis] Launching Deep Scan for %d files", len(scan_args))
                 with ThreadPoolExecutor(max_workers=4) as pool:
-                    futures = {pool.submit(_run_deep_scan, args): args[0] for args in scan_args}
+                    futures = {
+                        pool.submit(_run_deep_scan, args): args[0]
+                        for args in scan_args
+                    }
                     for fut in as_completed(futures):
                         try:
                             deep_findings = fut.result()
-                            if deep_findings:
-                                logger.info("[Analysis] Deep Scan found %d findings for %s", len(deep_findings), futures[fut])
-                                vulns.extend(deep_findings)
+                            # Confidence gate: only keep Deep Scan findings above threshold.
+                            # Deep Scan is LLM-only (no sandbox) so we use a tighter threshold.
+                            _DEEP_SCAN_MIN_CONFIDENCE = 0.85
+                            filtered = [
+                                f for f in deep_findings
+                                if f.confidence >= _DEEP_SCAN_MIN_CONFIDENCE
+                            ]
+                            if filtered:
+                                logger.info(
+                                    "[Analysis] Deep Scan: %d/%d findings kept for %s "
+                                    "(confidence >= %.2f)",
+                                    len(filtered),
+                                    len(deep_findings),
+                                    futures[fut],
+                                    _DEEP_SCAN_MIN_CONFIDENCE,
+                                )
+                                vulns.extend(filtered)
+                            elif deep_findings:
+                                logger.info(
+                                    "[Analysis] Deep Scan: all %d findings for %s dropped "
+                                    "(below confidence threshold)",
+                                    len(deep_findings),
+                                    futures[fut],
+                                )
                         except Exception as exc:
-                            logger.error("[Analysis] Deep scan failed for %s: %s", futures[fut], exc)
+                            logger.error(
+                                "[Analysis] Deep scan failed for %s: %s",
+                                futures[fut],
+                                exc,
+                            )
 
         agent.taint_paths = paths
         agent.vulnerabilities = vulns

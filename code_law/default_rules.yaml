@@ -102,3 +102,52 @@ rules:
     description: "Insecure os.system or subprocess.run with user-controlled input."
     pattern: "call:os.system|call:subprocess.run"
     applies_to: ["**/*.py"]
+
+  # ── JavaScript / TypeScript Security ──────────────────────────────────────
+  - id: js_eval_injection
+    severity: CRITICAL
+    description: "eval() with non-literal argument. Potential remote code execution."
+    pattern: "call:eval"
+    applies_to: ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx", "**/*.mjs"]
+
+  - id: js_command_injection
+    severity: CRITICAL
+    description: "child_process.exec or execSync with user-controlled input."
+    pattern: "call:exec|call:execSync|call:spawn|call:spawnSync"
+    applies_to: ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"]
+
+  - id: js_prototype_pollution
+    severity: CRITICAL
+    description: "Assignment to __proto__ or constructor.prototype detected."
+    pattern: "assign:__proto__|assign:constructor.prototype"
+    applies_to: ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"]
+
+  - id: js_path_traversal
+    severity: CRITICAL
+    description: "fs.readFile/writeFile with user-controlled path. Potential path traversal."
+    pattern: "call:readFile|call:writeFile|call:readFileSync|call:writeFileSync"
+    applies_to: ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"]
+
+  - id: js_sql_injection
+    severity: CRITICAL
+    description: "Raw SQL query construction with string concatenation or template literals."
+    pattern: "call:query|call:execute|call:raw"
+    applies_to: ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"]
+
+  - id: js_insecure_deserialization
+    severity: CRITICAL
+    description: "deserialize() or JSON.parse() on user-controlled input without schema validation."
+    pattern: "call:deserialize|call:unserialize"
+    applies_to: ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"]
+
+  - id: js_no_console_log_secrets
+    severity: ADVISORY
+    description: "console.log may leak sensitive data in production. Use a structured logger."
+    pattern: "call:console.log|call:console.error|call:console.warn"
+    applies_to: ["**/*.js", "**/*.jsx", "**/*.ts", "**/*.tsx"]
+
+  - id: ts_any_type_usage
+    severity: ADVISORY
+    description: "TypeScript 'any' type disables type checking. Use 'unknown' and narrow explicitly."
+    pattern: "type:any"
+    applies_to: ["**/*.ts", "**/*.tsx"]

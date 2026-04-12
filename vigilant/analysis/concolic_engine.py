@@ -332,7 +332,99 @@ class Z3Solver:
             formula_parts = ["input_len >= dest_size"]
             sym_vars = {"dest_size": dest_size, "input_len": input_len}
             return sym_vars, constraints, formula_parts
-        # ── 2. LLM-based Transpilation (Fallback) ───────────────────────────
+
+        # ── UAF: free() / delete / unique_ptr::reset ─────────────────────────
+        # Model: a pointer is allocated, then freed, then accessed.
+        # SAT when: is_freed == True AND is_accessed_after == True
+        if sink_name in ("free", "delete", "operator delete", "std::unique_ptr::reset"):
+            is_freed = z3.Bool("is_freed")
+            is_accessed_after = z3.Bool("is_accessed_after")
+            # We assert both must be True for the UAF to manifest
+            constraints = [is_freed, is_accessed_after]
+            formula_parts = ["is_freed == True", "is_accessed_after == True"]
+            sym_vars = {"is_freed": is_freed, "is_accessed_after": is_accessed_after}
+            return sym_vars, constraints, formula_parts
+
+        # ── Double-free: free() called twice on same pointer ─────────────────
+        # Model: free_count >= 2 for the same allocation
+        if sink_name in ("SysFreeString", "CoTaskMemFree"):
+            free_count = z3.Int("free_count")
+            constraints = [free_count >= 2]
+            formula_parts = ["free_count >= 2"]
+            sym_vars = {"free_count": free_count}
+            return sym_vars, constraints, formula_parts
+
+        # ── Uninitialized read: malloc without memset/calloc ─────────────────
+        # Model: is_initialized == False AND is_read == True
+        if sink_name in ("malloc", "realloc", "mmap"):
+            is_initialized = z3.Bool("is_initialized")
+            is_read = z3.Bool("is_read")
+            constraints = [z3.Not(is_initialized), is_read]
+            formula_parts = ["is_initialized == False", "is_read == True"]
+            sym_vars = {"is_initialized": is_initialized, "is_read": is_read}
+            return sym_vars, constraints, formula_parts
+
+        # ── Integer overflow in allocation size ───────────────────────────────
+        # Model: count * element_size overflows size_t (wraps to small value)
+        # Trigger: count = 2^30, element_size = 4 → count * 4 overflows to 0
+        if sink_name in ("calloc", "operator new", "new"):
+            count = z3.BitVec("count", 64)
+            element_size = z3.BitVec("element_size", 64)
+            alloc_size = z3.BitVec("alloc_size", 64)
+            max_size = z3.BitVecVal(0xFFFFFFFFFFFFFFFF, 64)
+
+            # Overflow condition: count * element_size != alloc_size in unbounded arithmetic
+            # Approximation: count > max_size / element_size (division-based overflow check)
+            constraints = [
+                count > z3.BitVecVal(0, 64),
+                element_size > z3.BitVecVal(0, 64),
+                z3.UGT(count, z3.UDiv(max_size, element_size)),
+            ]
+            formula_parts = [
+                "count > 0",
+                "element_size > 0",
+                "count > MAX_SIZE_T / element_size  (overflow)",
+            ]
+            sym_vars = {
+                "count": count,
+                "element_size": element_size,
+            }
+            return sym_vars, constraints, formula_parts
+
+        # ── Command injection: system() / popen() with tainted input ───────────
+        # Model: input contains a shell metacharacter
+        # Z3 cannot reason about string content directly, so we use a boolean
+        # model: has_metachar == True AND is_user_controlled == True
+        if sink_name in ("system", "popen", "exec", "execve", "execl", "execv"):
+            has_metachar = z3.Bool("has_metachar")
+            is_user_controlled = z3.Bool("is_user_controlled")
+            constraints = [has_metachar, is_user_controlled]
+            formula_parts = [
+                "has_metachar == True (input contains ; | & $ ` etc.)",
+                "is_user_controlled == True",
+            ]
+            sym_vars = {
+                "has_metachar": has_metachar,
+                "is_user_controlled": is_user_controlled,
+            }
+            return sym_vars, constraints, formula_parts
+
+        # ── BSTR leak: SysAllocString overwritten without SysFreeString ──────
+        if sink_name in ("CopyTo", "Attach", "SysAllocString"):
+            prev_allocated = z3.Bool("prev_bstr_allocated")
+            freed_before_overwrite = z3.Bool("freed_before_overwrite")
+            constraints = [prev_allocated, z3.Not(freed_before_overwrite)]
+            formula_parts = [
+                "prev_bstr_allocated == True",
+                "freed_before_overwrite == False  (leak path)",
+            ]
+            sym_vars = {
+                "prev_allocated": prev_allocated,
+                "freed_before_overwrite": freed_before_overwrite,
+            }
+            return sym_vars, constraints, formula_parts
+
+        # ── 2. LLM-based Transpilation (Fallback) ─────────────────────────────
         # If no LLM configured, fallback to basic reachability
         if not self.llm:
             reachable = z3.Bool(f"{sink_name}_reachable")
@@ -499,6 +591,54 @@ class LibFuzzerRunner:
 # ─────────────────────────────────────────────────────────────────────────────
 # Concolic Engine — top-level orchestrator
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _deep_scan_confidence(item: "DeepScanFinding") -> float:
+    """
+    Heuristic confidence score for a Deep Scan LLM finding.
+
+    Rules:
+    - Start at 0.85 (base for a CRITICAL finding with explanation).
+    - Boost to 0.92 if the explanation references a specific line number and
+      names a concrete sink function (e.g. 'memcpy', 'strcpy', 'system').
+    - Drop to 0.70 if the explanation is short (< 30 chars) — likely vague.
+    - Drop to 0.60 if the explanation contains uncertainty words.
+    - ADVISORY findings start at 0.75.
+    """
+    explanation = (item.explanation or "").lower()
+    severity = (item.severity or "").upper()
+
+    if severity == "ADVISORY":
+        base = 0.75
+    else:
+        base = 0.85
+
+    # Boost: specific sink function mentioned
+    high_signal_sinks = {
+        "memcpy", "strcpy", "strcat", "sprintf", "system", "free",
+        "malloc", "eval", "exec", "deserialize", "readfile",
+    }
+    if any(sink in explanation for sink in high_signal_sinks):
+        base = min(base + 0.07, 0.95)
+
+    # Boost: explanation references a specific line number
+    import re
+    if re.search(r"\bline\s+\d+\b", explanation):
+        base = min(base + 0.03, 0.95)
+
+    # Penalty: vague explanation
+    if len(explanation.strip()) < 30:
+        base = max(base - 0.20, 0.50)
+
+    # Penalty: uncertainty language
+    uncertainty_words = [
+        "may", "might", "could", "possibly", "potentially",
+        "unclear", "uncertain", "not sure", "depends",
+    ]
+    if any(word in explanation for word in uncertainty_words):
+        base = max(base - 0.10, 0.55)
+
+    return round(base, 2)
 
 
 class ConcolicEngine:
@@ -674,7 +814,7 @@ class ConcolicEngine:
                     vuln_id=str(uuid.uuid4()),
                     taint_path=path,
                     status=status,
-                    confidence=0.9,
+                    confidence=_deep_scan_confidence(item),
                     summary=f"Deep Scan: {rule_id} at line {line_number}",
                     z3_proof=item.explanation,
                 ))

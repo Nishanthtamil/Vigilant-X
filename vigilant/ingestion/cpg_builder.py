@@ -180,20 +180,20 @@ def _joern_export_script() -> Path:
 
 def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
     """
-    When Joern is unavailable, scan the repo with regex heuristics to produce
-    a minimal CPG stub. Emits:
-    - AST_FUNC nodes for each function definition
-    - CALL_SOURCE nodes for user-input call-sites (argv, scanf, read, fgets...)
-    - CALL_SINK  nodes for dangerous call-sites (memcpy, strcpy, free, ...)
-    - CALL edges: SOURCE -> enclosing-function -> SINK and FUNC -> FUNC
+    Regex-based CPG stub used when Joern is unavailable.
+    All file_path values are emitted as repo-relative POSIX strings to match
+    the format used by changed_files throughout the pipeline.
     """
     import re
 
-    SOURCES = {"argv", "scanf", "fgets", "read", "fread", "recv", "gets", "getenv", "SysAllocString", "SysAllocStringLen"}
-    SINKS   = {
+    SOURCES = {
+        "argv", "scanf", "fgets", "read", "fread", "recv", "gets",
+        "getenv", "SysAllocString", "SysAllocStringLen",
+    }
+    SINKS = {
         "memcpy", "strcpy", "strcat", "sprintf", "vsprintf",
         "free", "memset", "memmove", "strncpy", "system", "delete",
-        "SysFreeString", "CopyTo", "Attach", "Detach", "operator delete",
+        "SysFreeString", "CopyTo", "Attach", "Detach",
     }
 
     target_files = files or [
@@ -204,25 +204,32 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
     nodes: list[dict] = []
     edges: list[dict] = []
     func_name_to_id: dict[str, str] = {}
-    # Cache: file_path -> (src_text, list of (match, fname, func_id, body_text, line_start))
     file_parse_cache: dict[str, tuple[str, list]] = {}
 
-    # Pass 1: find all functions
-    # Improved regex to handle templates and some multiline signatures
+    def _rel(path_obj: Path) -> str:
+        """Always return a repo-relative POSIX string."""
+        try:
+            return path_obj.relative_to(repo_path).as_posix()
+        except ValueError:
+            return path_obj.as_posix()
+
     FUNC_RE = re.compile(
-        r"(?:template\s*<[^>]+>\s*)?"  # Optional template
-        r"(?:\w[\w\s\*&<>]+\s+)"       # Return type
-        r"(?P<name>\w+)"               # Function name
-        r"\s*\([^)]*\)"                # Arguments (simplified)
-        r"(?:\s*const)?(?:\s*override)?(?:\s*noexcept)?" # Qualifiers
-        r"\s*\{",                      # Opening brace
-        re.MULTILINE
+        r"(?:template\s*<[^>]+>\s*)?"
+        r"(?:\w[\w\s\*&<>]+\s+)"
+        r"(?P<name>\w+)"
+        r"\s*\([^)]*\)"
+        r"(?:\s*const)?(?:\s*override)?(?:\s*noexcept)?"
+        r"\s*\{",
+        re.MULTILINE,
     )
 
+    # Pass 1: find all functions
     for fpath in target_files:
         p = Path(fpath)
-        if not p.exists(): continue
+        if not p.exists():
+            continue
         src_text = p.read_text(errors="replace")
+        rel = _rel(p)
         matches = []
 
         for match in FUNC_RE.finditer(src_text):
@@ -231,7 +238,8 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
             body_text = src_text[body_start:]
             depth, end_idx = 0, len(body_text) - 1
             for i, ch in enumerate(body_text):
-                if ch == "{": depth += 1
+                if ch == "{":
+                    depth += 1
                 elif ch == "}":
                     depth -= 1
                     if depth == 0:
@@ -245,41 +253,46 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
             func_name_to_id[fname] = func_id
             nodes.append({
                 "node_id": func_id,
-                "file_path": str(p.relative_to(repo_path) if p.is_relative_to(repo_path) else p),
+                "file_path": rel,          # <-- repo-relative POSIX
                 "function_name": fname,
                 "line_start": line_start,
                 "line_end": line_end,
                 "node_type": "AST_FUNC",
-                "code": (match.group(0) + body)[:2000], # Include signature + body
+                "code": (match.group(0) + body)[:2000],
             })
             matches.append((match, fname, func_id, body, line_start))
         file_parse_cache[fpath] = (src_text, matches)
 
-    # Pass 2: find sources, sinks, and internal calls
+    # Pass 2: find sources, sinks, internal calls
     for fpath in target_files:
-        if fpath not in file_parse_cache: continue
+        if fpath not in file_parse_cache:
+            continue
         src_text, matches = file_parse_cache[fpath]
         p = Path(fpath)
+        rel = _rel(p)
 
         for match, fname, func_id, body, line_start in matches:
-            # Find argv access (common source)
+            # argv access
             for m in re.finditer(r"\bargv\[\d+\]", body):
                 cid = str(uuid.uuid4())
                 cline = line_start + body[: m.start()].count("\n")
                 nodes.append({
-                    "node_id": cid, "file_path": str(p.relative_to(repo_path) if p.is_relative_to(repo_path) else p),
-                    "function_name": "argv", "line_start": cline, "line_end": cline,
-                    "node_type": "CALL_SOURCE", "code": m.group(0),
+                    "node_id": cid,
+                    "file_path": rel,      # <-- repo-relative POSIX
+                    "function_name": "argv",
+                    "line_start": cline,
+                    "line_end": cline,
+                    "node_type": "CALL_SOURCE",
+                    "code": m.group(0),
                 })
                 edges.append({"src": cid, "dst": func_id, "type": "CALL"})
 
-            # Find calls
+            # function calls
             for call in re.finditer(r"\b(\w+)\s*\(", body):
                 cname = call.group(1)
                 cline = line_start + body[: call.start()].count("\n")
                 cid = str(uuid.uuid4())
 
-                # Always add the call node so dynamic/semantic sinks can be found
                 node_type = "CALL"
                 if cname in SOURCES:
                     node_type = "CALL_SOURCE"
@@ -287,27 +300,75 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
                     node_type = "CALL_SINK"
 
                 nodes.append({
-                    "node_id": cid, 
-                    "file_path": str(p.relative_to(repo_path) if p.is_relative_to(repo_path) else p),
-                    "function_name": cname, 
-                    "line_start": cline, 
+                    "node_id": cid,
+                    "file_path": rel,      # <-- repo-relative POSIX
+                    "function_name": cname,
+                    "line_start": cline,
                     "line_end": cline,
-                    "node_type": node_type, 
+                    "node_type": node_type,
                     "code": call.group(0),
                 })
-                
-                # Link source function to this call
+
                 if node_type == "CALL_SOURCE":
                     edges.append({"src": cid, "dst": func_id, "type": "CALL"})
                 else:
                     edges.append({"src": func_id, "dst": cid, "type": "CALL"})
 
-                # If it's an internal function, also link this call node to the target function definition
                 if cname in func_name_to_id:
-                    edges.append({"src": cid, "dst": func_name_to_id[cname], "type": "CALL"})
+                    edges.append({
+                        "src": cid,
+                        "dst": func_name_to_id[cname],
+                        "type": "CALL",
+                    })
 
     return {"nodes": nodes, "edges": edges}
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stable repo ID
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _stable_repo_id(repo_path: Path) -> str:
+    """
+    Derive a stable repository identifier that survives CI workspace changes.
+
+    Priority order:
+    1. Git remote URL (most stable — survives renames and re-clones).
+    2. Git repository root path hash (stable within one machine if no remote).
+    3. Fallback to resolved path hash (original behaviour).
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            remote_url = result.stdout.strip()
+            return hashlib.sha256(remote_url.encode()).hexdigest()[:16]
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            root = result.stdout.strip()
+            return hashlib.sha256(root.encode()).hexdigest()[:16]
+    except Exception:
+        pass
+
+    return hashlib.sha256(str(repo_path.resolve()).encode()).hexdigest()[:16]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -339,7 +400,7 @@ class CPGBuilder:
     ) -> CPGSummary:
         """Entry point for PR-scoped or full codebase ingestion."""
         run_id = uuid.uuid4().hex
-        repo_id = str(repo_path.resolve())
+        repo_id = _stable_repo_id(repo_path)
         if force_full or not self._has_existing_cpg(repo_id):
             return self._full_parse(repo_path, run_id=run_id, repo_id=repo_id)
 

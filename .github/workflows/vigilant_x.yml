@@ -50,11 +50,26 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install Vigilant-X
-        run: pip install -e ".[dev]"
+      - name: Install Vigilant-X and Semgrep
+        run: |
+          pip install -e ".[dev]"
+          pip install semgrep
 
-      - name: Build sandbox image
-        run: docker build --target sandbox -t vigilant-x-sandbox:latest .
+      - name: Cache sandbox image
+        id: cache-sandbox
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sandbox-image.tar
+          key: sandbox-${{ hashFiles('Dockerfile') }}
+
+      - name: Build or restore sandbox image
+        run: |
+          if [ -f /tmp/sandbox-image.tar ]; then
+            docker load -i /tmp/sandbox-image.tar
+          else
+            docker build --target sandbox -t vigilant-x-sandbox:latest .
+            docker save vigilant-x-sandbox:latest -o /tmp/sandbox-image.tar
+          fi
 
       - name: Run Vigilant-X
         env:

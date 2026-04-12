@@ -134,8 +134,56 @@ class PoCGenerator:
 
         fuzz_input = (
             f"\nFuzzer crash input (hex): {vuln.fuzz_crash_input[:128]}"
-            if vuln.fuzz_crash_input else ""
+            if vuln.fuzz_crash_input
+            else ""
         )
+
+        # For cross-file vulnerabilities, collect source file content so the LLM
+        # can include the correct headers and function signatures in the PoC.
+        cross_file_context = ""
+        if path.crosses_files:
+            src_file = self.repo_path / path.source.file_path
+            sink_file = self.repo_path / path.sink.file_path
+            src_snippet = ""
+            sink_snippet = ""
+            try:
+                if src_file.exists():
+                    lines = src_file.read_text(errors="replace").splitlines()
+                    # Include up to 60 lines around the source line
+                    start = max(0, path.source.line_number - 5)
+                    end = min(len(lines), path.source.line_number + 55)
+                    src_snippet = "\n".join(lines[start:end])
+            except Exception:
+                pass
+            try:
+                if sink_file.exists():
+                    lines = sink_file.read_text(errors="replace").splitlines()
+                    start = max(0, path.sink.line_number - 5)
+                    end = min(len(lines), path.sink.line_number + 55)
+                    sink_snippet = "\n".join(lines[start:end])
+            except Exception:
+                pass
+
+            cross_file_context = f"""
+CROSS-FILE VULNERABILITY — two separate files are involved:
+
+Source file ({path.source.file_path}), relevant excerpt:
+```cpp
+{src_snippet}
+```
+
+Sink file ({path.sink.file_path}), relevant excerpt:
+```cpp
+{sink_snippet}
+```
+
+IMPORTANT for the PoC:
+- Include BOTH files' relevant headers.
+- If the source function must be called first to set up state for the sink, call it in the test.
+- Use `extern "C"` declarations or direct includes as needed.
+- The repro must be a single self-contained .cpp file that compiles with:
+  clang++ -std=c++20 -fsanitize=address,undefined repro.cpp -lgtest -lgtest_main -lpthread -o repro
+"""
 
         return f"""
 Vulnerability Summary: {vuln.summary}
@@ -147,16 +195,21 @@ Z3 Formula: {vuln.z3_formula or "(Z3 returned unknown)"}
 
 Witness values (feed these into the vulnerable function):
 {witness_str}{fuzz_input}
-
+{cross_file_context}
 Mocking framework available: {self.mock_fw.detected}
 Mocking include: {self.mock_fw.include_directive}
 
 Write a single-file GoogleTest repro that:
 1. Includes <gtest/gtest.h> and the mocking include above.
 2. Calls {path.sink.function_name}() directly or through the call chain with the witness values.
-3. **EXPLOIT TRIGGER**: If this is a buffer overflow, use a string much larger than the target buffer (e.g. 256 bytes of 'A'). If it is a Use-After-Free, ensure you allocate other memory after the free to corrupt the heap before access.
-4. The test should be named: TEST(VigilantX, {path.sink.function_name.capitalize()}Overflow)
-4. Add a comment suggesting the C++20/23 fix.
+3. EXPLOIT TRIGGER:
+   - Buffer overflow: use a string much larger than the target buffer (use witness input_len value or 256 bytes of 'A').
+   - Use-After-Free: allocate other memory after the free to corrupt the heap before access.
+   - Integer overflow: use count = 0x40000001 with element_size = 4.
+   - Command injection: use input = "test; echo PWNED > /tmp/vigilant_poc".
+4. Test name: TEST(VigilantX, {path.sink.function_name.capitalize()}Vuln)
+5. Add a comment suggesting the C++20/23 fix.
+6. The file must compile as a standalone .cpp with no missing headers.
 """
 
     def _try_compile(self, code: str) -> bool:

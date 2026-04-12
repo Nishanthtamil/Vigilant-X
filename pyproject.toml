@@ -37,6 +37,8 @@ dependencies = [
     "typer>=0.12.0",
     # YAML (Code Law)
     "pyyaml>=6.0.1",
+    # Static analysis backends
+    "semgrep>=1.60.0",
     # Hashing / utilities
     "xxhash>=3.4.1",
     "cachetools>=5.3.0",
