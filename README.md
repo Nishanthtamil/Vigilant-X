@@ -11,7 +11,7 @@ Vigilant-X is architected to be **10x better than Code Rabbit** by moving beyond
 ```mermaid
 graph TD
     subgraph Ingestion_Plane
-        A[Joern CPG + Semgrep] --> B[Neo4j Global Graph]
+        A[Three-Tier CPG: Joern → clang-tidy → Regex] --> B[Neo4j Global Graph]
         C[IntentParser LLM] --> D[Autonomous API Discovery]
         B --> E[Graph Reconciliation]
         A --> F[Parallel Incremental Ingestion]
@@ -21,8 +21,9 @@ graph TD
         G[TaintTracker] --> H[Virtual Dispatch Bridge]
         H --> I[Library Summary Injection]
         J[Concolic Engine] --> K[LLM-to-Z3 SMT-LIBv2]
-        K --> L[Parallel Z3 Solve + Proof Cache]
+        K --> L[Temporal Program-Point Proofs + Cache]
         L --> M[Self-Correcting Formal Proof]
+        N2[DeepScanBudget] --> O2[Priority-Scored LLM Scan]
     end
 
     subgraph Validation_Plane
@@ -44,13 +45,50 @@ graph TD
 ```
 
 ### 🛡️ Why Vigilant-X is 10x Better:
-1.  **Formal Proof over Guesswork**: Vigilant-X uses a **Self-Correcting LLM-to-Z3 Bridge** that transpiles code to **SMT-LIBv2**. Findings are mathematically proven by the Z3 solver, not just "guessed" by an LLM.
-2.  **Parallel Execution**: **High-Performance Architecture** featuring parallelized file ingestion (incremental Joern) and concurrent Z3 path solving, reducing analysis time by up to 80%.
-3.  **Multi-Language Backend**: Extensible **CPGBackend Protocol** supporting C/C++ (Joern) and Python (Semgrep), with an abstraction layer for easy addition of Rust, JS/TS, and Go.
-4.  **GitHub Code Scanning (SARIF)**: Full integration with GitHub's Security tab via **SARIF 2.1.0 export**, enabling long-term vulnerability tracking and dismissal workflows.
-5.  **Global Data Flow & Cache**: Traces tainted data across project boundaries using **Neo4j + APOC**. Features a **Global Proof Cache** to avoid re-proving identical code patterns across PRs.
-6.  **Zero-Noise Verification**: Every "Proven" vulnerability is backed by a compiled PoC that **actually crashed** in a sandboxed environment.
-7.  **Hardened Security**: Rigorous **Credential Protection** (no hardcoded secrets) and **LLM-Guard** truncation for massive PR reviews, preventing silent API failures on complex findings.
+1.  **Temporal Formal Proofs**: Z3 models use **integer program-point ordering** (`alloc < free < access`) so the solver must find a feasible execution path — not just assert booleans. UAF, double-free, buffer overflows, and integer overflows are all formally provable.
+2.  **Three-Tier CPG Fallback**: When Joern is unavailable, Vigilant-X automatically falls back to **clang-tidy** (AST-based analysis covering templates, macros, RAII) before dropping to the regex stub. Coverage degrades gracefully with clear CLI warnings.
+3.  **Budget-Controlled Deep Scan**: The `DeepScanBudget` class caps LLM scans at **40 files per run**, scores files by PR-diff membership, extension priority, and rule severity, and enforces a **semaphore-based concurrency limit** to prevent 429 rate-limit errors.
+4.  **Parallel Execution**: **High-Performance Architecture** featuring parallelized file ingestion (incremental Joern) and concurrent Z3 path solving, reducing analysis time by up to 80%.
+5.  **Multi-Language Backend**: Extensible **CPGBackend Protocol** supporting C/C++ (Joern / clang-tidy) and Python (Semgrep), with an abstraction layer for easy addition of Rust, JS/TS, and Go.
+6.  **GitHub Code Scanning (SARIF)**: Full integration with GitHub's Security tab via **SARIF 2.1.0 export**, enabling long-term vulnerability tracking and dismissal workflows.
+7.  **Global Data Flow & Cache**: Traces tainted data across project boundaries using **Neo4j + APOC**. Features a **Global Proof Cache** to avoid re-proving identical code patterns across PRs.
+8.  **Zero-Noise Verification**: Every "Proven" vulnerability is backed by a compiled PoC that **actually crashed** in a sandboxed environment.
+9.  **Hardened Security**: Rigorous **Credential Protection** (no hardcoded secrets) and **LLM-Guard** truncation for massive PR reviews, preventing silent API failures on complex findings.
+
+---
+
+## 🔬 Formal Verification Models
+
+Vigilant-X encodes vulnerability classes as Z3 constraints with **temporal program-point ordering**:
+
+| Vulnerability | Z3 Model | Constraint |
+|---|---|---|
+| **Use-After-Free** | Integer program points | `alloc_pp ≥ 0 ∧ free_pp > alloc_pp ∧ access_pp > free_pp` |
+| **Double-Free** | Integer program points | `alloc_pp ≥ 0 ∧ free1_pp > alloc_pp ∧ free2_pp > free1_pp` |
+| **Buffer Overflow** | Integer sizes | `input_len > dest_size` (concrete values extracted from code) |
+| **Integer Overflow** | 64-bit BitVec | `count > MAX_SIZE_T / element_size` |
+| **Command Injection** | Boolean metachar model | `has_metachar ∧ is_user_controlled` |
+| **Uninit Read** | Boolean state model | `¬is_initialized ∧ is_read` |
+
+When Z3 returns **unknown** (e.g., black-box library calls), LibFuzzer takes over as a grey-box fallback.
+
+---
+
+## 🛠 CPG Analysis Tiers
+
+Vigilant-X uses a three-tier fallback for Code Property Graph construction:
+
+| Tier | Tool | Coverage | When Used |
+|---|---|---|---|
+| **1** | Joern | Full (templates, macros, cross-TU) | When `joern` / `joern-cli` is on PATH |
+| **2** | clang-tidy | ~50% of Joern (AST-based, RAII-aware) | Joern unavailable, `clang-tidy` on PATH |
+| **3** | Regex stub | ~30% (basic pattern matching) | Neither Joern nor clang-tidy available |
+
+The CLI surfaces clear warnings about the active tier:
+```
+⚠ Joern not found — using clang-tidy fallback. Coverage reduced (~50% of Joern).
+⚠ Neither Joern nor clang-tidy found — regex stub active. Coverage severely limited.
+```
 
 ---
 
@@ -59,7 +97,7 @@ graph TD
 ### 1. Clone & Install
 
 ```bash
-git clone https://github.com/nishanth/Vigilant-X.git
+git clone https://github.com/Nishanthtamil/Vigilant-X.git
 cd Vigilant-X
 pip install -e ".[dev]"
 ```
@@ -97,16 +135,18 @@ Vigilant-X includes a comprehensive test suite covering the formal bridge, sandb
 pytest tests/
 ```
 
+All 40 tests pass, including formal verification of Z3 temporal program-point models.
+
 ---
 
 ## 🛠 Tech Stack
 
 | Layer | Technology |
 |---|---|
-| **Orchestration** | Python 3.12 + LangGraph + concurrent.futures |
+| **Orchestration** | Python 3.12 + LangGraph + concurrent.futures + DeepScanBudget |
 | **LLM Engine** | Meta-Llama 4 (Scout) / GPT-4o / Claude 3.5 |
-| **Knowledge Graph** | Neo4j 5.x (APOC) + Joern CPG + Semgrep |
-| **Formal Logic** | Z3 SMT Solver (Parallel + Neo4j Proof Cache) |
+| **Knowledge Graph** | Neo4j 5.x (APOC) + Joern CPG + clang-tidy + Semgrep |
+| **Formal Logic** | Z3 SMT Solver (Temporal Program-Point Proofs + Neo4j Proof Cache) |
 | **Sandboxing** | Docker + LLVM Sanitizers (ASan, MSan, TSan, UBSan) |
 | **Reporting** | SARIF 2.1.0 + GitHub Suggested Changes |
 
