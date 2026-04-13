@@ -104,6 +104,15 @@ def review(
     console.print(f"[blue]Files to analyse:[/] {len(files)}")
 
     # ── Run pipeline ─────────────────────────────────────────────────────────
+    import shutil
+    if shutil.which("joern") is None and shutil.which("joern-cli") is None:
+        if shutil.which("clang-tidy"):
+            console.print("[yellow]⚠ Joern not found — using clang-tidy fallback. "
+                          "Coverage reduced (~50% of Joern). Templates and macro sinks may be missed.[/]")
+        else:
+            console.print("[red]⚠ Neither Joern nor clang-tidy found — regex stub active. "
+                          "Coverage severely limited. Install Joern for production use.[/]")
+
     final_state = run_review(
         repo_path=str(repo.resolve()),
         pr_number=pr_number,

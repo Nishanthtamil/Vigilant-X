@@ -64,7 +64,8 @@ def test_free_uaf_sat(solver):
     solver.builder = MockBuilder(sink_code="free(ptr)")
     status, witnesses, formula = solver._run_solve(path)
     assert status == VulnerabilityStatus.PROVEN
-    assert "is_freed" in formula
+    assert "free_program_point" in formula
+    assert "access_program_point" in formula
 
 
 def test_system_injection_sat(solver):

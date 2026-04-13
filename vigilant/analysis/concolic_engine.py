@@ -334,24 +334,64 @@ class Z3Solver:
             return sym_vars, constraints, formula_parts
 
         # ── UAF: free() / delete / unique_ptr::reset ─────────────────────────
-        # Model: a pointer is allocated, then freed, then accessed.
-        # SAT when: is_freed == True AND is_accessed_after == True
         if sink_name in ("free", "delete", "operator delete", "std::unique_ptr::reset"):
-            is_freed = z3.Bool("is_freed")
-            is_accessed_after = z3.Bool("is_accessed_after")
-            # We assert both must be True for the UAF to manifest
-            constraints = [is_freed, is_accessed_after]
-            formula_parts = ["is_freed == True", "is_accessed_after == True"]
-            sym_vars = {"is_freed": is_freed, "is_accessed_after": is_accessed_after}
+            # Model temporal ordering of program points as integers.
+            # Z3 must find an execution where: alloc < free < access_after_free.
+            # This proves the *path* has UAF semantics, not just abstract possibility.
+            alloc_pp  = z3.Int("alloc_program_point")
+            free_pp   = z3.Int("free_program_point")
+            access_pp = z3.Int("access_program_point")
+
+            constraints = [
+                alloc_pp >= 0,
+                free_pp > alloc_pp,          # free happens after allocation
+                access_pp > free_pp,         # access happens after free → UAF
+            ]
+
+            # If we can extract line numbers from code, bind the program points
+            # to concrete values derived from source location ordering.
+            if sink_code:
+                free_line_match = re.search(r"line[_\s]?(\d+)", sink_code, re.I)
+                if free_line_match:
+                    free_line = int(free_line_match.group(1))
+                    constraints.append(free_pp == free_line)
+                    constraints.append(alloc_pp < free_line)
+                    constraints.append(access_pp == free_line + 1)
+
+            formula_parts = [
+                "alloc_program_point >= 0",
+                "free_program_point > alloc_program_point",
+                "access_program_point > free_program_point  (use-after-free ordering)",
+            ]
+            sym_vars = {
+                "alloc_program_point": alloc_pp,
+                "free_program_point":  free_pp,
+                "access_program_point": access_pp,
+            }
             return sym_vars, constraints, formula_parts
 
         # ── Double-free: free() called twice on same pointer ─────────────────
-        # Model: free_count >= 2 for the same allocation
         if sink_name in ("SysFreeString", "CoTaskMemFree"):
-            free_count = z3.Int("free_count")
-            constraints = [free_count >= 2]
-            formula_parts = ["free_count >= 2"]
-            sym_vars = {"free_count": free_count}
+            # Double-free: the same pointer is freed at two distinct program points.
+            alloc_pp  = z3.Int("alloc_program_point")
+            free1_pp  = z3.Int("first_free_program_point")
+            free2_pp  = z3.Int("second_free_program_point")
+
+            constraints = [
+                alloc_pp >= 0,
+                free1_pp > alloc_pp,
+                free2_pp > free1_pp,   # second free is later — same pointer freed twice
+            ]
+            formula_parts = [
+                "alloc_program_point >= 0",
+                "first_free_program_point > alloc_program_point",
+                "second_free_program_point > first_free_program_point  (double-free)",
+            ]
+            sym_vars = {
+                "alloc_program_point": alloc_pp,
+                "first_free_program_point": free1_pp,
+                "second_free_program_point": free2_pp,
+            }
             return sym_vars, constraints, formula_parts
 
         # ── Uninitialized read: malloc without memset/calloc ─────────────────

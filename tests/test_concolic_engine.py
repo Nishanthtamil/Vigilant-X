@@ -69,7 +69,7 @@ class TestZ3Solver:
         path = _make_path(snk_func="free")
         status, witnesses, formula = solver.solve(path)
         assert status == VulnerabilityStatus.PROVEN
-        assert "is_freed" in formula
+        assert "free_program_point" in formula
 
     def test_formula_is_populated(self, mocker):
         mock_builder = mocker.Mock()

@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import tempfile
 import uuid
@@ -128,33 +129,41 @@ def _run_joern(repo_path: Path, files: list[str] | None = None) -> dict[str, Any
     Invoke Joern to generate a CPG for the given repo (or subset of files).
 
     Returns a dict representing the CPG JSON produced by Joern's export.
-    Falls back to a stub if Joern is not installed (for testing).
+    Three-tier fallback: Joern → clang-tidy → regex stub.
     """
     joern_bin = _find_joern()
-    if joern_bin is None:
-        logger.warning("Joern not found — returning stub CPG. Install Joern for real analysis.")
-        return _stub_cpg(repo_path, files)
+    if joern_bin is not None:
+        # Tier 1: full Joern analysis
+        with tempfile.TemporaryDirectory(prefix="joern_export_") as tmp:
+            output_path = Path(tmp) / "cpg_export.json"
+            cmd = [
+                joern_bin,
+                "--script", str(_joern_export_script()),
+                "--param", f"repoPath={repo_path}",
+                "--param", f"outputPath={output_path}",
+            ]
+            if files:
+                cmd += ["--param", f"files={','.join(files)}"]
 
-    with tempfile.TemporaryDirectory(prefix="joern_export_") as tmp:
-        output_path = Path(tmp) / "cpg_export.json"
-        cmd = [
-            joern_bin,
-            "--script", str(_joern_export_script()),
-            "--param", f"repoPath={repo_path}",
-            "--param", f"outputPath={output_path}",
-        ]
-        if files:
-            cmd += ["--param", f"files={','.join(files)}"]
-
-        logger.info("Running Joern: %s", " ".join(cmd))
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-        if result.returncode != 0:
+            logger.info("Running Joern: %s", " ".join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            if result.returncode == 0 and output_path.exists():
+                return json.loads(output_path.read_text())
             logger.error("Joern failed: %s", result.stderr)
-            return {}
 
-        if output_path.exists():
-            return json.loads(output_path.read_text())
-        return {}
+    # Tier 2: clang-tidy (AST-based, handles templates/macros/RAII)
+    clang_result = _clang_tidy_cpg(repo_path, files)
+    if clang_result is not None:
+        logger.info("Using clang-tidy CPG (Joern unavailable)")
+        return clang_result
+
+    # Tier 3: regex stub (last resort)
+    logger.warning(
+        "Joern AND clang-tidy unavailable — using regex stub CPG. "
+        "Install Joern for production-grade analysis, or clang-tidy for improved coverage. "
+        "Macro-hidden sinks, RAII patterns, and template vulnerabilities will be missed."
+    )
+    return _stub_cpg(repo_path, files)
 
 
 def _find_joern() -> str | None:
@@ -176,6 +185,119 @@ def _joern_export_script() -> Path:
             script_path,
         )
     return script_path
+
+
+def _clang_tidy_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any] | None:
+    """
+    Intermediate-fidelity CPG using clang-tidy's AST-based analysis.
+    Handles templates, macros, RAII, and multi-TU flows that the regex stub misses.
+    Returns None if clang-tidy is not available so the caller falls back to stub.
+    """
+    import shutil
+    import json as _json
+
+    clang_tidy = shutil.which("clang-tidy")
+    if clang_tidy is None:
+        return None
+
+    target_files = files or [
+        str(p) for ext in ("*.cpp", "*.cc", "*.c")
+        for p in repo_path.rglob(ext)
+    ]
+
+    nodes: list[dict] = []
+
+    # clang-tidy checks that map to our sink/source categories
+    checks = ",".join([
+        "clang-analyzer-security.insecureAPI.*",
+        "clang-analyzer-unix.Malloc",
+        "clang-analyzer-unix.MallocSizeof",
+        "clang-analyzer-cplusplus.NewDelete",
+        "clang-analyzer-cplusplus.NewDeleteLeaks",
+        "clang-analyzer-security.FloatLoopCounter",
+        "clang-analyzer-alpha.security.ArrayBound",
+        "clang-analyzer-alpha.security.MallocOverflow",
+        "clang-analyzer-alpha.unix.SimpleStream",
+    ])
+
+    for fpath in target_files[:50]:   # cap at 50 files per run
+        p = Path(fpath)
+        if not p.exists():
+            continue
+        try:
+            result = subprocess.run(
+                [
+                    clang_tidy,
+                    f"--checks={checks}",
+                    "--export-fixes=-",   # JSON diagnostics to stdout
+                    str(p),
+                    "--",
+                    "-std=c++20",
+                    f"-I{repo_path}",
+                ],
+                capture_output=True, text=True, timeout=60,
+                cwd=repo_path,
+            )
+        except Exception as e:
+            logger.debug("clang-tidy failed for %s: %s", p.name, e)
+            continue
+
+        # Parse YAML-like clang-tidy output (each diagnostic on stderr)
+        # clang-tidy emits: file:line:col: warning: message [check-name]
+        diag_re = re.compile(
+            r"^(?P<file>[^:]+):(?P<line>\d+):\d+:\s+(?:warning|error):\s+(?P<msg>.+?)\s+\[(?P<check>[^\]]+)\]"
+        )
+        for line in (result.stdout + result.stderr).splitlines():
+            m = diag_re.match(line)
+            if not m:
+                continue
+            try:
+                rel = Path(m.group("file")).relative_to(repo_path).as_posix()
+            except ValueError:
+                rel = m.group("file")
+
+            # Map clang-tidy check names to our sink taxonomy
+            check = m.group("check")
+            sink_name = _clang_check_to_sink(check, m.group("msg"))
+            if not sink_name:
+                continue
+
+            nodes.append({
+                "node_id": str(uuid.uuid4()),
+                "file_path": rel,
+                "function_name": sink_name,
+                "line_start": int(m.group("line")),
+                "line_end": int(m.group("line")),
+                "node_type": "CALL_SINK",
+                "code": m.group("msg"),
+            })
+
+    if not nodes:
+        return None   # clang-tidy found nothing; fall through to stub
+
+    logger.info("clang-tidy CPG: %d findings across %d files", len(nodes), len(target_files))
+    return {"nodes": nodes, "edges": []}
+
+
+def _clang_check_to_sink(check: str, msg: str) -> str | None:
+    """Map a clang-tidy check name to a Vigilant-X sink function name."""
+    msg_lower = msg.lower()
+    if "use-after-free" in msg_lower or "NewDelete" in check:
+        return "free"
+    if "double-free" in msg_lower:
+        return "free"
+    if "malloc" in msg_lower or "MallocOverflow" in check:
+        return "malloc"
+    if "buffer" in msg_lower and ("overflow" in msg_lower or "overrun" in msg_lower):
+        return "memcpy"
+    if "ArrayBound" in check:
+        return "memcpy"
+    if "insecureAPI" in check:
+        if "strcpy" in msg_lower: return "strcpy"
+        if "sprintf" in msg_lower: return "sprintf"
+        if "gets" in msg_lower: return "gets"
+        if "system" in msg_lower: return "system"
+    return None
 
 
 def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:

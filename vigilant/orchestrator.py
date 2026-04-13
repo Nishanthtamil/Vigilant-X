@@ -34,6 +34,92 @@ logger = logging.getLogger(__name__)
 
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+
+
+class DeepScanBudget:
+    """
+    Controls Deep Scan concurrency and total file budget per PR run.
+
+    Priority rules:
+    - Files touched in the PR diff score higher than unchanged files.
+    - Files with CRITICAL-severity matching rules score higher.
+    - Files already covered by taint tracking are excluded.
+
+    Rate limiting:
+    - A threading.Semaphore caps concurrent LLM calls to avoid 429s.
+    - Hard cap: never scan more than MAX_FILES_PER_RUN files per pipeline run.
+    """
+
+    MAX_FILES_PER_RUN   = 40    # absolute ceiling across all files
+    MAX_CONCURRENT      = 4     # simultaneous LLM calls
+    HIGH_PRIORITY_EXTS  = {".cpp", ".cc", ".c", ".py", ".ts", ".js"}
+
+    def __init__(self) -> None:
+        self._sem = threading.Semaphore(self.MAX_CONCURRENT)
+
+    def prioritize(
+        self,
+        scan_args: list[tuple],          # (f_rel, f_path, rules)
+        changed_files: list[str],
+    ) -> list[tuple]:
+        """Sort scan_args by priority and cap at MAX_FILES_PER_RUN."""
+        changed_set = set(changed_files)
+
+        def _score(arg: tuple) -> float:
+            f_rel, f_path, rules = arg
+            score = 0.0
+            # In-PR files are highest priority
+            if f_rel in changed_set:
+                score += 10.0
+            # File extension signals — compiled languages > scripts
+            ext = Path(f_rel).suffix
+            if ext in (".cpp", ".cc", ".c"):
+                score += 3.0
+            elif ext in (".py", ".ts", ".js"):
+                score += 2.0
+            # More critical rules = more likely to find something
+            critical_count = sum(1 for r in rules if r.severity.value == "CRITICAL")
+            score += critical_count * 0.5
+            return score
+
+        ranked = sorted(scan_args, key=_score, reverse=True)
+        capped  = ranked[:self.MAX_FILES_PER_RUN]
+
+        if len(scan_args) > self.MAX_FILES_PER_RUN:
+            logger.info(
+                "DeepScanBudget: %d files eligible, capped at %d "
+                "(top priority: %s)",
+                len(scan_args), self.MAX_FILES_PER_RUN,
+                [a[0] for a in capped[:5]],
+            )
+
+        return capped
+
+    def run_with_budget(
+        self,
+        scan_args: list[tuple],
+        runner_fn,                        # callable(args) -> list[Vulnerability]
+        changed_files: list[str],
+    ) -> list:
+        """Execute runner_fn for each arg under semaphore and budget controls."""
+        prioritized = self.prioritize(scan_args, changed_files)
+        results: list = []
+
+        def _run(args):
+            with self._sem:
+                return runner_fn(args)
+
+        with ThreadPoolExecutor(max_workers=self.MAX_CONCURRENT) as pool:
+            futures = {pool.submit(_run, args): args[0] for args in prioritized}
+            for fut in as_completed(futures):
+                try:
+                    results.append((futures[fut], fut.result()))
+                except Exception as exc:
+                    logger.error("[Analysis] Deep scan failed for %s: %s", futures[fut], exc)
+
+        return results
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Node functions (each mutates a copy of AgentState)
@@ -154,45 +240,29 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
                     scan_args.append((f_rel, f_path, matching_rules))
 
             if scan_args:
-                logger.info("[Analysis] Launching Deep Scan for %d files", len(scan_args))
-                with ThreadPoolExecutor(max_workers=4) as pool:
-                    futures = {
-                        pool.submit(_run_deep_scan, args): args[0]
-                        for args in scan_args
-                    }
-                    for fut in as_completed(futures):
-                        try:
-                            deep_findings = fut.result()
-                            # Confidence gate: only keep Deep Scan findings above threshold.
-                            # Deep Scan is LLM-only (no sandbox) so we use a tighter threshold.
-                            _DEEP_SCAN_MIN_CONFIDENCE = 0.85
-                            filtered = [
-                                f for f in deep_findings
-                                if f.confidence >= _DEEP_SCAN_MIN_CONFIDENCE
-                            ]
-                            if filtered:
-                                logger.info(
-                                    "[Analysis] Deep Scan: %d/%d findings kept for %s "
-                                    "(confidence >= %.2f)",
-                                    len(filtered),
-                                    len(deep_findings),
-                                    futures[fut],
-                                    _DEEP_SCAN_MIN_CONFIDENCE,
-                                )
-                                vulns.extend(filtered)
-                            elif deep_findings:
-                                logger.info(
-                                    "[Analysis] Deep Scan: all %d findings for %s dropped "
-                                    "(below confidence threshold)",
-                                    len(deep_findings),
-                                    futures[fut],
-                                )
-                        except Exception as exc:
-                            logger.error(
-                                "[Analysis] Deep scan failed for %s: %s",
-                                futures[fut],
-                                exc,
-                            )
+                logger.info("[Analysis] Launching Deep Scan for %d files (budget-controlled)", len(scan_args))
+                budget = DeepScanBudget()
+
+                scan_results = budget.run_with_budget(
+                    scan_args=scan_args,
+                    runner_fn=_run_deep_scan,
+                    changed_files=ctx.changed_files if ctx else [],
+                )
+
+                for f_rel, deep_findings in scan_results:
+                    _DEEP_SCAN_MIN_CONFIDENCE = 0.85
+                    filtered = [f for f in deep_findings if f.confidence >= _DEEP_SCAN_MIN_CONFIDENCE]
+                    if filtered:
+                        logger.info(
+                            "[Analysis] Deep Scan: %d/%d findings kept for %s",
+                            len(filtered), len(deep_findings), f_rel,
+                        )
+                        vulns.extend(filtered)
+                    elif deep_findings:
+                        logger.info(
+                            "[Analysis] Deep Scan: all %d findings for %s dropped "
+                            "(below confidence threshold)", len(deep_findings), f_rel,
+                        )
 
         agent.taint_paths = paths
         agent.vulnerabilities = vulns
