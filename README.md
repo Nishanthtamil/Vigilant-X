@@ -148,6 +148,42 @@ All 40 tests pass, including formal verification of Z3 temporal program-point mo
 | **Knowledge Graph** | Neo4j 5.x (APOC) + Joern CPG + clang-tidy + Semgrep |
 | **Formal Logic** | Z3 SMT Solver (Temporal Program-Point Proofs + Neo4j Proof Cache) |
 | **Sandboxing** | Docker + LLVM Sanitizers (ASan, MSan, TSan, UBSan) |
+| **Solvers** | Z3 SMT, MiniSat |
+
+## 🌐 Multi-Language Support
+
+Vigilant-X uses language-specific backends that go beyond generic pattern matching:
+
+| Language | Primary Backend | Fallback | Framework-Aware |
+|---|---|---|---|
+| **C/C++** | Joern (full AST + CPG) | clang-tidy → regex stub | Yes (COM/ATL) |
+| **Python** | Bandit (AST + OWASP) | Semgrep p/python | Yes (Django, Flask, FastAPI) |
+| **JavaScript** | Semgrep + ESLint Security | Semgrep p/javascript | Yes (Express, Next.js) |
+| **TypeScript** | Semgrep + ESLint Security | Semgrep p/typescript | Yes (Express, Next.js) |
+| **Go** | gosec | Semgrep p/security-audit | Yes (Gin) |
+| **Java** | SpotBugs + FindSecBugs | Semgrep p/security-audit | Yes (Spring) |
+| **Ruby** | Brakeman | Semgrep p/security-audit | Yes (Rails) |
+| **Rust** | cargo-audit + clippy | — | No |
+| **PHP / Kotlin** | Semgrep p/security-audit | — | No |
+
+### Framework detection
+
+Vigilant-X reads `requirements.txt`, `package.json`, `pom.xml`, `Gemfile`,
+`composer.json`, and `go.mod` to detect active frameworks and automatically
+inject framework-specific sink definitions into the taint tracker. For example,
+Django's `raw()` and `extra(where=)` are flagged as injection sinks while
+`filter()` and `get()` are whitelisted as safe ORM patterns.
+
+### Production deployment
+
+```bash
+# Start the Celery worker pool (4 concurrent workers)
+celery -A vigilant.worker worker --concurrency=4 -Q pr_reviews --loglevel=info
+
+# Or use the programmatic API in your GitHub webhook handler:
+from vigilant.worker import enqueue_review
+enqueue_review(repo_path, pr_number, base_sha, head_sha, changed_files, github_repo)
+```
 | **Reporting** | SARIF 2.1.0 + GitHub Suggested Changes |
 
 ---

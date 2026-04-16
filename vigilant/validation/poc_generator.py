@@ -213,26 +213,40 @@ Write a single-file GoogleTest repro that:
 """
 
     def _try_compile(self, code: str) -> bool:
-        """Dry-run compile check using the sandbox compiler."""
+        """Full compile check — catches both syntax and linker errors."""
         compiler_info = self.build_inf.sandbox_compiler_flags()
         compiler = compiler_info.get("compiler", "clang++")
         if not shutil.which(compiler):
-            return True   # Skip check if compiler not on PATH
+            return True  # Skip check if compiler not on PATH
 
         with tempfile.NamedTemporaryFile(suffix=".cpp", mode="w", delete=False) as f:
             f.write(code)
             src = Path(f.name)
 
+        out = src.with_suffix("")
         try:
             result = subprocess.run(
-                [compiler, "-fsyntax-only", "-std=c++20", str(src)],
-                capture_output=True, text=True, timeout=15,
+                [
+                    compiler,
+                    "-std=c++20",
+                    "-fsanitize=address",
+                    "-fno-omit-frame-pointer",
+                    "-g", "-O1",
+                    str(src),
+                    "-lgtest", "-lgtest_main", "-lpthread",
+                    "-o", str(out),
+                ],
+                capture_output=True, text=True, timeout=20,
             )
+            if result.returncode != 0:
+                logger.debug("PoCGenerator compile check failed:\n%s", result.stderr[:500])
             return result.returncode == 0
-        except Exception:
-            return True  # Don't block on compile-check failures
+        except Exception as e:
+            logger.debug("PoCGenerator compile check exception: %s", e)
+            return True  # Don't block on infrastructure failures
         finally:
             src.unlink(missing_ok=True)
+            out.unlink(missing_ok=True)
 
     def _retry_simpler(self, vuln: Vulnerability) -> str:
         """Fallback: generate a minimal, unconditional repro."""

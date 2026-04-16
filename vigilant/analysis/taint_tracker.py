@@ -72,10 +72,19 @@ class TaintTracker:
     pure Cypher if APOC is not installed.
     """
 
-    def __init__(self, driver: Driver | None = None, code_law: CodeLaw | None = None) -> None:
+    def __init__(
+        self,
+        driver: Driver | None = None,
+        code_law: CodeLaw | None = None,
+        repo_path: Path | None = None,
+    ) -> None:
+        from vigilant.ingestion.framework_detector import FrameworkDetector
         self.driver = driver or get_driver()
         self.code_law = code_law or CodeLaw()
         self._apoc_available: bool | None = None   # lazy check
+        self._framework_detector: FrameworkDetector | None = (
+            FrameworkDetector(repo_path) if repo_path else None
+        )
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -102,6 +111,16 @@ class TaintTracker:
         if pr_intent:
             sources.extend(getattr(pr_intent, "dynamic_sources", []))
             sinks.extend(getattr(pr_intent, "dynamic_sinks", []))
+
+        # Inject framework-specific sinks
+        if self._framework_detector:
+            fw_sinks = self._framework_detector.extra_sinks()
+            if fw_sinks:
+                sinks.extend(fw_sinks)
+                logger.info(
+                    "TaintTracker: added %d framework-specific sinks (%s)",
+                    len(fw_sinks), self._framework_detector.summary(),
+                )
 
         self._bridge_opaque_binaries()
         self._resolve_virtual_calls()

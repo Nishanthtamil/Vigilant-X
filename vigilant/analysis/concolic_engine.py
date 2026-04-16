@@ -786,6 +786,15 @@ class ConcolicEngine:
 
         try:
             content = file_path.read_text()
+            # Guard: truncate to 12,000 chars to prevent context window overflow on
+            # minified JS bundles or generated code. Log a warning if truncated.
+            if len(content) > 12_000:
+                logger.warning(
+                    "deep_scan: %s is %d chars — truncating to 12,000 for LLM context window",
+                    file_path.name, len(content),
+                )
+                content = content[:12_000]
+
             rules_str = "\n".join([f"- {r.id}: {r.description}" for r in rules])
 
             prompt = (

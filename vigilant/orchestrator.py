@@ -35,6 +35,26 @@ logger = logging.getLogger(__name__)
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import time
+
+
+class _RateLimiter:
+    """Token-bucket rate limiter for LLM API calls."""
+    def __init__(self, rps: float):
+        self._interval = 1.0 / rps
+        self._last = 0.0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            wait = self._interval - (now - self._last)
+            if wait > 0:
+                time.sleep(wait)
+            self._last = time.monotonic()
+
+
+_LLM_RATE_LIMITER = _RateLimiter(rps=0.4)  # 24 RPM sustained — safe under Groq 30 RPM free tier
 
 
 class DeepScanBudget:
@@ -107,6 +127,7 @@ class DeepScanBudget:
         results: list = []
 
         def _run(args):
+            _LLM_RATE_LIMITER.acquire()
             with self._sem:
                 return runner_fn(args)
 
@@ -172,7 +193,7 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
     try:
         logger.info("[Analysis] Running taint tracker")
         code_law = CodeLaw(repo_path=repo_path)
-        tracker = TaintTracker(code_law=code_law)
+        tracker = TaintTracker(code_law=code_law, repo_path=repo_path)
         paths = tracker.find_taint_paths(
             pr_intent=agent.pr_intent,
             changed_files=ctx.changed_files if ctx else None

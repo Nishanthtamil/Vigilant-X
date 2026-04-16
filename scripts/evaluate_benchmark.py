@@ -299,5 +299,132 @@ def run_benchmarks():
     print(f"Avg Time per file: {avg_time:.2f} seconds")
     print("===========================================")
 
+
+def run_juliet_benchmark(cwe_id: str = "CWE121", max_cases: int = 200) -> None:
+    """
+    Run Vigilant-X against Juliet Test Suite cases for a specific CWE.
+
+    Download Juliet from: https://samate.nist.gov/SARD/test-suites/116
+    Extract to: benchmarks/juliet/<CWE_ID>/
+    Files named *_bad*.cpp should be found as vulnerable.
+    Files named *_good*.cpp should be found as clean.
+
+    Usage:
+        python scripts/evaluate_benchmark.py --juliet CWE121
+    """
+    from pathlib import Path as _P
+
+    juliet_path = ROOT_DIR / "benchmarks" / "juliet" / cwe_id
+    if not juliet_path.exists():
+        print(f"Juliet dataset for {cwe_id} not found at {juliet_path}")
+        print(f"Download from https://samate.nist.gov/SARD/test-suites/116")
+        print(f"and extract the {cwe_id} directory to {juliet_path}")
+        return
+
+    bad_files  = sorted(juliet_path.glob("*_bad*.cpp"))[:max_cases]
+    good_files = sorted(juliet_path.glob("*_good*.cpp"))[:max_cases]
+    total_files = bad_files + good_files
+
+    if not total_files:
+        print(f"No test cases found in {juliet_path}")
+        return
+
+    print(f"\nRunning Juliet {cwe_id}: {len(bad_files)} bad + {len(good_files)} good cases")
+
+    setup_benchmark_repo()
+    tp = fp = tn = fn = 0
+    start_time = time.time()
+
+    for file_path in total_files:
+        is_bad = "_bad" in file_path.name
+        file_name = file_path.name
+        print(f"\n--- Evaluating {file_name} ---")
+
+        # Clear Neo4j between runs
+        try:
+            driver = get_driver()
+            with driver.session() as session:
+                session.run("MATCH (n) DETACH DELETE n")
+        except Exception as e:
+            print(f"Failed to clear Neo4j: {e}")
+
+        for f in BENCHMARK_REPO.glob("*.cpp"):
+            f.unlink()
+
+        dest = BENCHMARK_REPO / file_name
+        import shutil as _shutil
+        _shutil.copy2(file_path, dest)
+
+        try:
+            state = run_review(
+                repo_path=str(BENCHMARK_REPO.absolute()),
+                pr_number=0,
+                base_sha="main",
+                head_sha="head",
+                changed_files=[file_name],
+                dry_run=True,
+            )
+            critical_vulns = [
+                v for v in state.vulnerabilities
+                if v.status in (
+                    VulnerabilityStatus.SANDBOX_VERIFIED,
+                    VulnerabilityStatus.FUZZ_VERIFIED,
+                    VulnerabilityStatus.PROVEN,
+                )
+            ]
+            has_bug = len(critical_vulns) > 0
+
+            if is_bad:
+                if has_bug:
+                    print(f"[TP] correctly found bug")
+                    tp += 1
+                else:
+                    print(f"[FN] missed bug")
+                    fn += 1
+            else:
+                if has_bug:
+                    print(f"[FP] false positive on clean code")
+                    fp += 1
+                else:
+                    print(f"[TN] correctly found nothing")
+                    tn += 1
+
+        except Exception as e:
+            print(f"Error: {e}")
+            if is_bad:
+                fn += 1
+            else:
+                fp += 1
+
+    elapsed = time.time() - start_time
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1        = (2 * precision * recall / (precision + recall)
+                 if (precision + recall) > 0 else 0.0)
+    fpr       = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+
+    print(f"\n{'='*50}")
+    print(f"JULIET {cwe_id} BENCHMARK RESULTS")
+    print(f"{'='*50}")
+    print(f"True Positives  (TP): {tp}")
+    print(f"False Positives (FP): {fp}")
+    print(f"True Negatives  (TN): {tn}")
+    print(f"False Negatives (FN): {fn}")
+    print(f"{'─'*50}")
+    print(f"Precision:  {precision:.3f}")
+    print(f"Recall:     {recall:.3f}")
+    print(f"F1-Score:   {f1:.3f}")
+    print(f"FPR:        {fpr:.3f}")
+    print(f"Total time: {elapsed:.1f}s ({elapsed/len(total_files):.1f}s/file)")
+    print(f"{'='*50}")
+
+
 if __name__ == "__main__":
-    run_benchmarks()
+    import sys
+    if "--juliet" in sys.argv:
+        idx = sys.argv.index("--juliet")
+        cwe = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else "CWE121"
+        max_n = int(sys.argv[idx + 2]) if idx + 2 < len(sys.argv) else 200
+        run_juliet_benchmark(cwe, max_n)
+    else:
+        run_benchmarks()

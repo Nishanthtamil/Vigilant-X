@@ -30,7 +30,8 @@ def load_suppressions(repo_path: Path) -> set[tuple[str, int, str]]:
         try:
             line_number = int(parts[1].strip())
         except ValueError:
-            line_number = 0
+            logger.warning("Suppression: invalid line number in: %s — skipping", line)
+            continue
         rule_id = parts[2].strip()
         suppressions.add((file_path, line_number, rule_id))
     return suppressions

@@ -68,6 +68,7 @@ class TestTaintTracker:
         tracker.code_law = CodeLaw.__new__(CodeLaw)
         tracker.code_law.rules = []
         tracker._apoc_available = False
+        tracker._framework_detector = None
         return tracker
 
     def test_returns_taint_paths(self):
