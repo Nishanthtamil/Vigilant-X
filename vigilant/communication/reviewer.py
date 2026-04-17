@@ -95,6 +95,7 @@ class Reviewer:
             VulnerabilityStatus.PROVEN,
             VulnerabilityStatus.FUZZ_VERIFIED,
             VulnerabilityStatus.SANDBOX_VERIFIED,
+            VulnerabilityStatus.LIKELY,
         }
         verified_vulns = [
             v for v in vulnerabilities
@@ -103,6 +104,18 @@ class Reviewer:
         advisory_vulns = [
             v for v in vulnerabilities
             if v.status == VulnerabilityStatus.ADVISORY
+        ]
+
+        # PROVEN findings that Z3 confirmed but sandbox couldn't verify
+        # These are reported separately with a lower severity indicator
+        likely_vulns = [
+            v for v in vulnerabilities
+            if v.status == VulnerabilityStatus.LIKELY
+        ]
+        proven_unverified = [
+            v for v in vulnerabilities
+            if v.status == VulnerabilityStatus.PROVEN
+            and v.vuln_id not in {v2.vuln_id for v2 in verified_vulns}
         ]
 
         # ── Generate fix for each verified vuln ───────────────────────────────
@@ -116,6 +129,12 @@ class Reviewer:
                     fix.fix_sandbox_result = self.sandbox_runner.run(vuln, fix_poc)
             fixes[vuln.vuln_id] = fix
 
+        # ── Generate fixes for LIKELY vulns (same as verified) ─────────────
+        for vuln in likely_vulns:
+            sandbox_res = sandbox_results.get(vuln.vuln_id)
+            fix = self._generate_fix(vuln, sandbox_res)
+            fixes[vuln.vuln_id] = fix
+
         # ── Advisory comments ─────────────────────────────────────────────────
         for vuln in advisory_vulns:
             comment = self._advisory_comment(vuln)
@@ -125,6 +144,7 @@ class Reviewer:
         markdown_body = self._compose_markdown(
             verified_vulns, fixes, sandbox_results, advisory_comments,
             walkthrough=walkthrough,
+            likely_vulns=likely_vulns,
         )
 
         return ReviewReport(
@@ -341,11 +361,13 @@ Provide the root cause explanation and a C++20/23 fix suggestion.
         sandbox_results: dict[str, SandboxResult],
         advisory_comments: list[str],
         walkthrough: str = "",
+        likely_vulns: list[Vulnerability] | None = None,
     ) -> str:
+        likely_vulns = likely_vulns or []
         # Always start with walkthrough if available
         prefix = f"{walkthrough}\n\n" if walkthrough else ""
 
-        if not verified and not advisory_comments:
+        if not verified and not advisory_comments and not likely_vulns:
             return (
                 f"{prefix}"
                 "## ✅ Vigilant-X: No Issues Found\n\n"
@@ -355,7 +377,8 @@ Provide the root cause explanation and a C++20/23 fix suggestion.
         parts: list[str] = [
             "## 🔴 Vigilant-X Security Review",
             "",
-            f"> **{len(verified)} verified vulnerabilities** | "
+            f"> **{len(verified)} verified** | "
+            f"**{len(likely_vulns)} likely** | "
             f"{len(advisory_comments)} advisory notes",
             "",
         ]
@@ -368,6 +391,7 @@ Provide the root cause explanation and a C++20/23 fix suggestion.
                 VulnerabilityStatus.PROVEN: "🔴",
                 VulnerabilityStatus.FUZZ_VERIFIED: "🟠",
                 VulnerabilityStatus.SANDBOX_VERIFIED: "🔴",
+                VulnerabilityStatus.LIKELY: "🟡",
             }.get(vuln.status, "🟡")
 
             parts += [
@@ -417,6 +441,29 @@ Provide the root cause explanation and a C++20/23 fix suggestion.
                 fix_res = fix.fix_sandbox_result
                 fix_status = "✅ Fix verified clean by sandbox" if fix_res.passed else "⚠️ Fix sandbox check inconclusive"
                 parts += [f"_{fix_status}_", ""]
+
+        if likely_vulns:
+            parts += ["---", "### 🟡 Z3-Proven (Sandbox Inconclusive)", ""]
+            parts += [
+                "> These vulnerabilities were **mathematically proven** by Z3 formal "
+                "verification. The sandbox PoC could not confirm a crash (likely due to "
+                "compilation environment, wrong sanitizer, or missing dependencies). "
+                "Manual review is recommended.",
+                "",
+            ]
+            for i, vuln in enumerate(likely_vulns, 1):
+                fix = fixes.get(vuln.vuln_id)
+                path = vuln.taint_path
+                parts += [
+                    f"#### Issue #{i}: {vuln.taint_path.sink.function_name.upper()} "
+                    f"(Z3-proven, unconfirmed by sandbox)",
+                    f"**Z3 Formula:** `{vuln.z3_formula or '(see explanation)'}`",
+                    f"**Path:** `{path.source.file_path}:{path.source.line_number}` → "
+                    f"`{path.sink.file_path}:{path.sink.line_number}`",
+                    "",
+                ]
+                if fix and fix.description:
+                    parts += [fix.description[:2000], ""]
 
         if advisory_comments:
             parts += ["---", "### 💡 Advisory Notes", ""]

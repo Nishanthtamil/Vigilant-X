@@ -13,12 +13,14 @@ _REPORTABLE = {
     VulnerabilityStatus.PROVEN,
     VulnerabilityStatus.SANDBOX_VERIFIED,
     VulnerabilityStatus.FUZZ_VERIFIED,
+    VulnerabilityStatus.LIKELY,
 }
 
 _LEVEL = {
     VulnerabilityStatus.PROVEN: "error",
     VulnerabilityStatus.SANDBOX_VERIFIED: "error",
     VulnerabilityStatus.FUZZ_VERIFIED: "warning",
+    VulnerabilityStatus.LIKELY: "note",
 }
 
 _MIN_CONFIDENCE = 0.85  # findings below this threshold are dropped from SARIF

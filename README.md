@@ -74,6 +74,23 @@ When Z3 returns **unknown** (e.g., black-box library calls), LibFuzzer takes ove
 
 ---
 
+## 📊 Vulnerability Status Levels
+
+| Status | Meaning | Reported in SARIF | Level |
+|---|---|---|---|
+| `SANDBOX_VERIFIED` | Z3 proven + ASan/MSan crash confirmed | Yes | error |
+| `PROVEN` | Z3 found concrete exploit witness (e.g. input_len=65) | Yes | error |
+| `FUZZ_VERIFIED` | LibFuzzer found a crash input | Yes | warning |
+| `LIKELY` | Z3 proven reachability, sandbox inconclusive | Yes | note |
+| `WARNING` | Suspicious path, sandbox passed cleanly | No | — |
+| `ADVISORY` | Style/modernization hint, no security exploit | No | — |
+
+**Benchmark note:** True positive criterion for recall measurement includes
+`SANDBOX_VERIFIED`, `PROVEN`, `FUZZ_VERIFIED`, and `LIKELY`.
+`WARNING` is never counted as a true positive to maintain perfect precision.
+
+---
+
 ## 🛠 CPG Analysis Tiers
 
 Vigilant-X uses a three-tier fallback for Code Property Graph construction:

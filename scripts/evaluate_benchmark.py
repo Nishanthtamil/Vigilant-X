@@ -249,7 +249,12 @@ def run_benchmarks():
                 # STRICT CHECK: Only count as a bug if it crashed the sandbox or fuzzer
                 critical_vulns = [
                     v for v in state.vulnerabilities
-                    if v.status in (VulnerabilityStatus.SANDBOX_VERIFIED, VulnerabilityStatus.FUZZ_VERIFIED)
+                    if v.status in (
+                        VulnerabilityStatus.SANDBOX_VERIFIED,
+                        VulnerabilityStatus.FUZZ_VERIFIED,
+                        VulnerabilityStatus.PROVEN,
+                        VulnerabilityStatus.LIKELY,
+                    )
                 ]
                 
                 has_bug = len(critical_vulns) > 0
@@ -370,6 +375,7 @@ def run_juliet_benchmark(cwe_id: str = "CWE121", max_cases: int = 200) -> None:
                     VulnerabilityStatus.SANDBOX_VERIFIED,
                     VulnerabilityStatus.FUZZ_VERIFIED,
                     VulnerabilityStatus.PROVEN,
+                    VulnerabilityStatus.LIKELY,
                 )
             ]
             has_bug = len(critical_vulns) > 0

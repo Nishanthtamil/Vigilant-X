@@ -88,3 +88,15 @@ def test_warning_is_not_written():
     write_sarif(state, out)
     data = json.loads(out.read_text())
     assert len(data["runs"][0]["results"]) == 0
+
+
+def test_likely_is_written_at_note_level():
+    state = _make_state([_make_vuln(VulnerabilityStatus.LIKELY, 0.95)])
+    with tempfile.NamedTemporaryFile(suffix=".sarif", delete=False) as f:
+        out = Path(f.name)
+    write_sarif(state, out)
+    data = json.loads(out.read_text())
+    results = data["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["level"] == "note"
+

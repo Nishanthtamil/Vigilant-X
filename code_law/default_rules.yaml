@@ -151,3 +151,134 @@ rules:
     description: "TypeScript 'any' type disables type checking. Use 'unknown' and narrow explicitly."
     pattern: "type:any"
     applies_to: ["**/*.ts", "**/*.tsx"]
+
+  # ── Python Framework Security ─────────────────────────────────────────────
+  - id: python_sql_injection
+    severity: CRITICAL
+    description: "String-based SQL query construction. Use parameterized queries."
+    pattern: "call:execute|call:executemany|call:raw|call:RawSQL"
+    applies_to: ["**/*.py"]
+
+  - id: python_deserialization
+    severity: CRITICAL
+    description: "Unsafe deserialization via pickle or yaml.load without Loader."
+    pattern: "call:pickle.loads|call:pickle.load|call:yaml.load|call:marshal.loads"
+    applies_to: ["**/*.py"]
+
+  - id: python_path_traversal
+    severity: CRITICAL
+    description: "File path construction with user input. Potential path traversal."
+    pattern: "call:open|call:Path"
+    applies_to: ["**/*.py"]
+
+  - id: python_ssrf
+    severity: CRITICAL
+    description: "HTTP request with user-controlled URL. Potential SSRF."
+    pattern: "call:requests.get|call:requests.post|call:urllib.request.urlopen"
+    applies_to: ["**/*.py"]
+
+  - id: python_hardcoded_secret
+    severity: CRITICAL
+    description: "Potential hardcoded password, secret key, or API token."
+    pattern: "assign:password|assign:secret|assign:api_key|assign:token"
+    applies_to: ["**/*.py"]
+
+  - id: django_orm_injection
+    severity: CRITICAL
+    description: "Django ORM raw() or extra(where=) with user input. Use parameterized ORM methods."
+    pattern: "call:raw|call:extra|call:RawSQL|call:from_db"
+    applies_to: ["**/models.py", "**/views.py", "**/*.py"]
+
+  - id: django_xss_render
+    severity: CRITICAL
+    description: "render_to_string or render with user-controlled template name."
+    pattern: "call:render_to_string|call:mark_safe"
+    applies_to: ["**/*.py"]
+
+  - id: flask_template_injection
+    severity: CRITICAL
+    description: "render_template_string() with user input enables SSTI."
+    pattern: "call:render_template_string"
+    applies_to: ["**/*.py"]
+
+  - id: python_weak_crypto
+    severity: CRITICAL
+    description: "Weak cryptographic algorithm (MD5, SHA1) for security-sensitive operations."
+    pattern: "call:md5|call:sha1|call:hashlib.md5|call:hashlib.sha1"
+    applies_to: ["**/*.py"]
+
+  # ── Go Security ───────────────────────────────────────────────────────────
+  - id: go_sql_injection
+    severity: CRITICAL
+    description: "SQL query construction with string formatting. Use db.Query with placeholders."
+    pattern: "call:Sprintf|call:fmt.Sprintf"
+    applies_to: ["**/*.go"]
+
+  - id: go_command_injection
+    severity: CRITICAL
+    description: "exec.Command with user-controlled arguments."
+    pattern: "call:exec.Command|call:exec.CommandContext"
+    applies_to: ["**/*.go"]
+
+  - id: go_tls_insecure
+    severity: CRITICAL
+    description: "InsecureSkipVerify=true disables TLS certificate verification."
+    pattern: "assign:InsecureSkipVerify"
+    applies_to: ["**/*.go"]
+
+  - id: go_integer_overflow
+    severity: CRITICAL
+    description: "Explicit integer type conversion may overflow. Check value ranges."
+    pattern: "cast:int32|cast:int16|cast:uint32|cast:uint16"
+    applies_to: ["**/*.go"]
+
+  # ── Java Security ─────────────────────────────────────────────────────────
+  - id: java_sql_injection
+    severity: CRITICAL
+    description: "Statement.execute() with string concatenation. Use PreparedStatement."
+    pattern: "call:execute|call:executeQuery|call:executeUpdate"
+    applies_to: ["**/*.java"]
+
+  - id: java_deserialization
+    severity: CRITICAL
+    description: "ObjectInputStream.readObject() deserializes untrusted data."
+    pattern: "call:readObject|call:readUnshared"
+    applies_to: ["**/*.java"]
+
+  - id: java_xxe
+    severity: CRITICAL
+    description: "XML parser without XXE protection. Disable external entities."
+    pattern: "call:DocumentBuilderFactory|call:SAXParserFactory|call:XMLInputFactory"
+    applies_to: ["**/*.java"]
+
+  - id: java_path_traversal
+    severity: CRITICAL
+    description: "File construction with user input. Validate and canonicalize paths."
+    pattern: "call:new File|call:Paths.get|call:FileInputStream"
+    applies_to: ["**/*.java"]
+
+  # ── Ruby Security ─────────────────────────────────────────────────────────
+  - id: ruby_command_injection
+    severity: CRITICAL
+    description: "Shell command execution with user input via system(), exec(), or backticks."
+    pattern: "call:system|call:exec|call:popen|call:spawn"
+    applies_to: ["**/*.rb"]
+
+  - id: ruby_sql_injection
+    severity: CRITICAL
+    description: "ActiveRecord query with string interpolation. Use parameterized queries."
+    pattern: "call:where|call:find_by_sql|call:execute"
+    applies_to: ["**/*.rb"]
+
+  - id: ruby_unsafe_deserialization
+    severity: CRITICAL
+    description: "Marshal.load() on untrusted data enables remote code execution."
+    pattern: "call:Marshal.load|call:Marshal.restore"
+    applies_to: ["**/*.rb"]
+
+  - id: ruby_open_redirect
+    severity: CRITICAL
+    description: "Redirect with user-controlled URL. Validate redirect target."
+    pattern: "call:redirect_to"
+    applies_to: ["**/*.rb", "**/*.erb"]
+

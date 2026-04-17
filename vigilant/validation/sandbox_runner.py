@@ -125,21 +125,25 @@ class SandboxRunner:
 
     def _infer_sanitizer(self, vuln: Vulnerability) -> str:
         """
-        Map a sink function name to the most effective LLVM sanitizer.
+        Map a vulnerability to the most effective LLVM sanitizer.
+        requires_msan=True means the Z3 proof involved uninitialized memory —
+        ASan will not catch this class of bug.
         """
+        # Explicit MSan requirement from Z3 proof (uninit-read/CWE457 pattern)
+        if getattr(vuln, "requires_msan", False):
+            return "memory"
+
         sink = vuln.taint_path.sink.function_name.lower()
-        
-        # Concurrency / Threading
+
+        # Concurrency / threading — TSan is the correct tool
         if any(kw in sink for kw in ("thread", "pthread", "fork", "atomic")):
             return "thread"
-        
-        # Uninitialized memory (MSan)
-        # Note: malloc itself is a source, but if the sink is something that
-        # reads that memory (like a comparison or branch), MSan is best.
+
+        # malloc/realloc/mmap as sinks often indicate uninit-read
         if any(kw in sink for kw in ("malloc", "realloc", "mmap")):
             return "memory"
-            
-        # Default: AddressSanitizer (covers overflows, UAF, double-free)
+
+        # Default: AddressSanitizer covers overflows, UAF, double-free
         return "address,undefined"
 
     # ── Docker execution ──────────────────────────────────────────────────────

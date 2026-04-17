@@ -327,25 +327,54 @@ def node_validate(state: dict[str, Any]) -> dict[str, Any]:
 
             if not agent.dry_run or settings.sandbox_always_run:
                 logger.info("[Validation] Running sandbox for %s", vuln.vuln_id[:8])
+                # Capture sanitizer type before running so we can assess correctness
+                sanitizer_type = sandbox._infer_sanitizer(vuln)
                 result = sandbox.run(vuln, poc)
                 agent.sandbox_results[vuln.vuln_id] = result
 
-                # ── Sandbox Tie-Breaker ───────────────────────────────────────
-                # If sandbox confirmed a crash, upgrade status
                 if not result.passed and not result.compilation_error:
+                    # Confirmed crash — upgrade to SANDBOX_VERIFIED
                     vuln = vuln.model_copy(update={"status": VulnerabilityStatus.SANDBOX_VERIFIED})
                     logger.info("[Validation] Sandbox CRASH confirmed: %s", result.crash_type)
+
                 elif result.passed:
-                    # If sandbox passed (no crash), it's a False Positive or unexploitable
-                    # Downgrade from PROVEN/FUZZ_VERIFIED to WARNING
-                    old_status = vuln.status
-                    vuln = vuln.model_copy(update={"status": VulnerabilityStatus.WARNING})
-                    logger.info(
-                        "[Validation] Sandbox PASSED (no crash). Downgrading %s: %s → WARNING",
-                        vuln.vuln_id[:8], old_status
+                    # Sandbox passed. Only downgrade PROVEN to WARNING if the correct
+                    # sanitizer was used. A passed ASan run on an MSan-class bug is NOT
+                    # evidence the bug doesn't exist.
+                    ran_correct_sanitizer = not (
+                        getattr(vuln, "requires_msan", False)
+                        and sanitizer_type not in ("memory",)
                     )
+                    if ran_correct_sanitizer:
+                        old_status = vuln.status
+                        vuln = vuln.model_copy(update={"status": VulnerabilityStatus.WARNING})
+                        logger.info(
+                            "[Validation] Sandbox PASSED with correct sanitizer. "
+                            "Downgrading %s: %s → WARNING",
+                            vuln.vuln_id[:8], old_status,
+                        )
+                    else:
+                        # Wrong sanitizer for this vuln class — preserve PROVEN
+                        logger.info(
+                            "[Validation] Sandbox PASSED but wrong sanitizer (%s) "
+                            "for MSan-class vuln %s — preserving %s status",
+                            sanitizer_type, vuln.vuln_id[:8], vuln.status,
+                        )
+
                 elif result.compilation_error:
-                    logger.warning("[Validation] Sandbox compile error for %s", vuln.vuln_id[:8])
+                    # PoC couldn't compile — infrastructure issue, not proof of safety.
+                    # Downgrade PROVEN to LIKELY (still reportable, lower severity).
+                    if vuln.status == VulnerabilityStatus.PROVEN:
+                        vuln = vuln.model_copy(update={"status": VulnerabilityStatus.LIKELY})
+                        logger.info(
+                            "[Validation] PoC compile error for %s — "
+                            "downgrading PROVEN → LIKELY (infrastructure issue, not FP)",
+                            vuln.vuln_id[:8],
+                        )
+                    else:
+                        logger.warning(
+                            "[Validation] Sandbox compile error for %s", vuln.vuln_id[:8]
+                        )
             else:
                 logger.info("[Validation] dry-run: skipping sandbox for %s", vuln.vuln_id[:8])
 

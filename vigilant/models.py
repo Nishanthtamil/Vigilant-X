@@ -92,6 +92,7 @@ class VulnerabilityStatus(str, Enum):
     PROVEN = "PROVEN"               # Z3 found a satisfying witness
     FUZZ_VERIFIED = "FUZZ_VERIFIED" # LibFuzzer found a crash (Z3 returned unknown)
     SANDBOX_VERIFIED = "SANDBOX_VERIFIED"  # ASan/TSan/MSan crash confirmed
+    LIKELY = "LIKELY"               # Z3-proven, sandbox inconclusive/wrong sanitizer
     WARNING = "WARNING"             # Suspicious path, sandbox passed (no crash)
     ADVISORY = "ADVISORY"           # ADVISORY severity rule — no sandbox
     FALSE_POSITIVE = "FALSE_POSITIVE"
@@ -113,6 +114,7 @@ class Vulnerability(BaseModel):
     fuzz_crash_input: str = ""
     confidence: float = 0.0    # 0.0–1.0
     summary: str = ""           # Short human-readable headline
+    requires_msan: bool = False  # True when Z3 proof involves is_initialized
 
 
 # ─────────────────────────────────────────────────────────────────────────────
