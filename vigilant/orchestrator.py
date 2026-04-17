@@ -204,12 +204,6 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
         engine = ConcolicEngine()
         vulns = engine.analyze(paths)
         
-        # BENCHMARK HEURISTIC: Downgrade findings in '_good' files immediately
-        for v in vulns:
-            if v.taint_path and "_good" in str(v.taint_path.source.file_path):
-                logger.warning("[Analysis] Benchmark heuristic: suppressing concolic engine findings in 'good' file %s", v.taint_path.source.file_path)
-                v.status = VulnerabilityStatus.ADVISORY
-
         # ── Deep Scan Fallback ────────────────────────────────────────────────
         # If no vulnerabilities found, or for files matching specific rules,
         # perform a direct LLM-powered review of the file content.
@@ -280,12 +274,6 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
                     _DEEP_SCAN_MIN_CONFIDENCE = 0.85
                     filtered = [f for f in deep_findings if f.confidence >= _DEEP_SCAN_MIN_CONFIDENCE]
                     
-                    # BENCHMARK HEURISTIC: Downgrade findings in '_good' files immediately
-                    if "_good" in f_rel:
-                        logger.warning("[Analysis] Benchmark heuristic: suppressing deep scan findings in 'good' file %s", f_rel)
-                        for f in filtered:
-                            f.status = VulnerabilityStatus.ADVISORY
-                    
                     if filtered:
                         logger.info(
                             "[Analysis] Deep Scan: %d/%d findings kept for %s",
@@ -355,12 +343,6 @@ def node_validate(state: dict[str, Any]) -> dict[str, Any]:
                     # Confirmed crash — upgrade to SANDBOX_VERIFIED
                     vuln = vuln.model_copy(update={"status": VulnerabilityStatus.SANDBOX_VERIFIED})
                     logger.info("[Validation] Sandbox CRASH confirmed: %s", result.crash_type)
-                    
-                    # BENCHMARK HEURISTIC: If we are in a 'good' file but it still crashes, 
-                    # it's likely a PoC generator hallucination re-introducing the bug.
-                    if "_good" in str(vuln.taint_path.source.file_path):
-                        logger.warning("[Validation] Benchmark heuristic: crash in 'good' file detected. Downgrading to ADVISORY.")
-                        vuln = vuln.model_copy(update={"status": VulnerabilityStatus.ADVISORY})
 
                 elif result.passed:
                     # Sandbox passed.
@@ -385,21 +367,19 @@ def node_validate(state: dict[str, Any]) -> dict[str, Any]:
                             "for MSan-class vuln %s — preserving %s status",
                             sanitizer_type, vuln.vuln_id[:8], vuln.status,
                         )
-
                 elif result.compilation_error:
                     # PoC couldn't compile — infrastructure issue, not proof of safety.
-                    # Downgrade PROVEN to LIKELY (still reportable, lower severity).
+                    # Keep as is or downgrade PROVEN to LIKELY.
                     if vuln.status == VulnerabilityStatus.PROVEN:
                         vuln = vuln.model_copy(update={"status": VulnerabilityStatus.LIKELY})
                         logger.info(
                             "[Validation] PoC compile error for %s — "
-                            "downgrading PROVEN → LIKELY (infrastructure issue, not FP)",
+                            "downgrading PROVEN → LIKELY (infrastructure issue)",
                             vuln.vuln_id[:8],
                         )
                     else:
-                        logger.warning(
-                            "[Validation] Sandbox compile error for %s", vuln.vuln_id[:8]
-                        )
+                        # already LIKELY or similar
+                        pass
             else:
                 logger.info("[Validation] dry-run: skipping sandbox for %s", vuln.vuln_id[:8])
 

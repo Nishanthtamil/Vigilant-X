@@ -264,7 +264,8 @@ class SandboxRunner:
         # If we have original source, mount it and include it in compilation
         if original_src:
             # Repo is mounted at /repo
-            container_src.append(f"/repo/{original_src.as_posix()}")
+            # We use -Dmain=... to avoid entry point conflicts if the source has a main()
+            container_src.append(f"-Dmain=vigilant_original_main /repo/{original_src.as_posix()}")
 
         cmd = [compiler, "-std=c++20"] + container_src + flags + (extra_flags or []) + libs + ["-o", "repro"]
         
