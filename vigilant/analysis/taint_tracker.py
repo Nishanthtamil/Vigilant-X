@@ -150,7 +150,8 @@ class TaintTracker:
     def _get_query(self, scoped: bool) -> str:
         base_apoc = """
 MATCH (source:CPGNode)
-WHERE source.function_name IN $sources AND source.node_type CONTAINS 'CALL'
+WHERE source.function_name IN $sources 
+  AND (source.node_type CONTAINS 'CALL' OR source.node_type IN ['METHOD_PARAMETER_IN', 'IDENTIFIER'])
   AND ($scoped = false OR source.file_path IN $changed_files)
 
 MATCH (sink:CPGNode)
@@ -187,7 +188,8 @@ LIMIT 100
 """
         base_fallback = """
 MATCH path = (source:CPGNode)-[:CALL|REACHING_DEF|REF*1..15]->(sink:CPGNode)
-WHERE source.function_name IN $sources AND source.node_type CONTAINS 'CALL'
+WHERE source.function_name IN $sources 
+  AND (source.node_type CONTAINS 'CALL' OR source.node_type IN ['METHOD_PARAMETER_IN', 'IDENTIFIER'])
   AND ($scoped = false OR source.file_path IN $changed_files)
   AND sink.function_name IN $sinks AND sink.node_type CONTAINS 'CALL'
 RETURN

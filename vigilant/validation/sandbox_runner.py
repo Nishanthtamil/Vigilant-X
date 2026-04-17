@@ -42,6 +42,7 @@ CRASH_PATTERNS = [
     (re.compile(r"use of uninitialized value", re.I), "uninit-value", "MSan"),
     (re.compile(r"SUMMARY: UndefinedBehaviorSanitizer", re.I), "undefined-behavior", "UBSan"),
     (re.compile(r"SUMMARY: AddressSanitizer", re.I), "asan-crash", "ASan"),
+    (re.compile(r"SUMMARY: MemorySanitizer", re.I), "msan-crash", "MSan"),
 ]
 
 STACK_TRACE_RE = re.compile(
@@ -88,6 +89,7 @@ class SandboxRunner:
             # We always run the project's own level first, then fall back to high optimization 
             # to detect optimization-induced UB.
             matrix = [
+                ("-O0", "clang++"),  # Baseline: no optimizations, best for ASan
                 (file_meta.get("opt_level", "-O1"), "clang++"),
                 ("-O3", "clang++"),  # Catch UB optimized away or introduced at O3
                 ("-O2", "clang++")   # O2 sweep to catch UB that O3 optimises away
@@ -98,7 +100,8 @@ class SandboxRunner:
                 logger.info("SandboxRunner: running matrix entry (%s, %s)", opt_level, compiler_override)
                 compile_cmd = self._build_compile_cmd(
                     repro_src, compiler_info, poc.content, sanitizer_type, 
-                    file_meta.get("flags", []), opt_level, compiler_override
+                    file_meta.get("flags", []), opt_level, compiler_override,
+                    original_src=Path(vuln.taint_path.source.file_path)
                 )
                 
                 # Determine if this is an override compared to project defaults
@@ -131,6 +134,10 @@ class SandboxRunner:
         """
         # Explicit MSan requirement from Z3 proof (uninit-read/CWE457 pattern)
         if getattr(vuln, "requires_msan", False):
+            return "memory"
+
+        summary = vuln.summary.lower()
+        if "cwe-457" in summary or "uninitialized" in summary:
             return "memory"
 
         sink = vuln.taint_path.sink.function_name.lower()
@@ -229,21 +236,38 @@ class SandboxRunner:
 
     def _build_compile_cmd(
         self, src: Path, compiler_info: dict, poc_content: str = "", sanitizer: str = "address,undefined",
-        extra_flags: list[str] | None = None, opt_level: str = "-O1", compiler_override: str = "clang++"
+        extra_flags: list[str] | None = None, opt_level: str = "-O1", compiler_override: str = "clang++",
+        original_src: Path | None = None
     ) -> list[str]:
         # Always prefer clang++ for sanitizer compatibility; g++ for cross-verification if available
         compiler = compiler_override
 
-        # MSan requires track-origins for better debugging
         flags = [f"-fsanitize={sanitizer}", "-fno-omit-frame-pointer", "-g", opt_level]
+        libs = ["-lpthread"]
+
         if sanitizer == "memory":
+            # MSan requires track-origins for better debugging
             flags.append("-fsanitize-memory-track-origins")
+            # Use our custom instrumented libc++ if it exists (fallback to system if build failed)
+            # For this environment, we'll stick to standard libc++ but keep the MSan flag
+            flags.extend([
+                "-stdlib=libc++",
+            ])
+            libs.extend(["-lgtest"]) 
+        else:
+            libs.append("-lgtest")
 
         # The src Path is within the temp directory, which is mounted to /workspace/build in the container.
         # Inside the container, it's just src.name.
-        container_src = src.name
+        container_src = [src.name]
+        
+        # If we have original source, mount it and include it in compilation
+        if original_src:
+            # Repo is mounted at /repo
+            container_src.append(f"/repo/{original_src.as_posix()}")
 
-        cmd = [compiler, "-std=c++20", container_src] + flags + (extra_flags or []) + ["-lgtest", "-lpthread", "-o", "repro"]
+        cmd = [compiler, "-std=c++20"] + container_src + flags + (extra_flags or []) + libs + ["-o", "repro"]
+        
         if "int main(" not in poc_content:
             cmd.append("-lgtest_main")
         return cmd

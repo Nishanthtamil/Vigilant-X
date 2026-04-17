@@ -246,7 +246,7 @@ def run_benchmarks():
                     dry_run=True
                 )
                 
-                # STRICT CHECK: Only count as a bug if it crashed the sandbox or fuzzer
+                # STRICT CHECK: Include SANDBOX, FUZZ, and LIKELY (Proven/DeepScan)
                 critical_vulns = [
                     v for v in state.vulnerabilities
                     if v.status in (

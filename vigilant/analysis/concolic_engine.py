@@ -657,12 +657,12 @@ def _deep_scan_confidence(item: "DeepScanFinding") -> float:
     if severity == "ADVISORY":
         base = 0.75
     else:
-        base = 0.85
+        base = 0.88
 
     # Boost: specific sink function mentioned
     high_signal_sinks = {
         "memcpy", "strcpy", "strcat", "sprintf", "system", "free",
-        "malloc", "eval", "exec", "deserialize", "readfile",
+        "malloc", "eval", "exec", "deserialize", "readfile", "delete",
     }
     if any(sink in explanation for sink in high_signal_sinks):
         base = min(base + 0.07, 0.95)
@@ -682,7 +682,7 @@ def _deep_scan_confidence(item: "DeepScanFinding") -> float:
         "unclear", "uncertain", "not sure", "depends",
     ]
     if any(word in explanation for word in uncertainty_words):
-        base = max(base - 0.10, 0.55)
+        base = max(base - 0.05, 0.55)
 
     return round(base, 2)
 
@@ -857,7 +857,9 @@ class ConcolicEngine:
             for item in response.findings:
                 rule_id = item.rule_id
                 severity_str = item.severity.upper()
-                status = VulnerabilityStatus.PROVEN if severity_str == "CRITICAL" else VulnerabilityStatus.ADVISORY
+                
+                # Use LIKELY for LLM-only findings; reserve PROVEN for Z3
+                status = VulnerabilityStatus.LIKELY if severity_str == "CRITICAL" else VulnerabilityStatus.ADVISORY
                 
                 line_number = item.line_number
                 dummy_node = TaintNode(
@@ -884,6 +886,7 @@ class ConcolicEngine:
                     confidence=_deep_scan_confidence(item),
                     summary=f"Deep Scan: {rule_id} at line {line_number}",
                     z3_proof=item.explanation,
+                    requires_msan="cwe-457" in rule_id.lower() or "uninitialized" in item.explanation.lower(),
                 ))
             
             return vulns

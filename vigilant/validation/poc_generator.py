@@ -185,12 +185,31 @@ IMPORTANT for the PoC:
   clang++ -std=c++20 -fsanitize=address,undefined repro.cpp -lgtest -lgtest_main -lpthread -o repro
 """
 
+        # Always provide context for the source and sink functions
+        source_context = ""
+        try:
+            src_file = self.repo_path / path.source.file_path
+            if src_file.exists():
+                lines = src_file.read_text(errors="replace").splitlines()
+                # Include a window around the source
+                start = max(0, path.source.line_number - 20)
+                end = min(len(lines), path.source.line_number + 40)
+                source_context = "\n".join(lines[start:end])
+        except Exception:
+            pass
+
         return f"""
 Vulnerability Summary: {vuln.summary}
 
 Source: {path.source.function_name}() in {path.source.file_path} (line {path.source.line_number})
 Sink:   {path.sink.function_name}() in {path.sink.file_path} (line {path.sink.line_number})
 Cross-file: {path.crosses_files}
+
+Relevant code from {path.source.file_path}:
+```cpp
+{source_context}
+```
+
 Z3 Formula: {vuln.z3_formula or "(Z3 returned unknown)"}
 
 Witness values (feed these into the vulnerable function):
@@ -200,16 +219,18 @@ Mocking framework available: {self.mock_fw.detected}
 Mocking include: {self.mock_fw.include_directive}
 
 Write a single-file GoogleTest repro that:
-1. Includes <gtest/gtest.h> and the mocking include above.
-2. Calls {path.sink.function_name}() directly or through the call chain with the witness values.
-3. EXPLOIT TRIGGER:
-   - Buffer overflow: use a string much larger than the target buffer (use witness input_len value or 256 bytes of 'A').
-   - Use-After-Free: allocate other memory after the free to corrupt the heap before access.
-   - Integer overflow: use count = 0x40000001 with element_size = 4.
-   - Command injection: use input = "test; echo PWNED > /tmp/vigilant_poc".
-4. Test name: TEST(VigilantX, {path.sink.function_name.capitalize()}Vuln)
-5. Add a comment suggesting the C++20/23 fix.
-6. The file must compile as a standalone .cpp with no missing headers.
+1. Includes <gtest/gtest.h> and any necessary project headers.
+2. CALLS the function {path.sink.function_name}() from the project. 
+3. DO NOT re-implement {path.sink.function_name}() or any other project function.
+4. Assume the project source is LINKED; use 'extern' if you don't have the header.
+5. THE GOAL is to prove that the EXISTING project code is vulnerable by calling it with specific inputs.
+6. If the project code has been FIXED (e.g. bounds checks added), your test should ideally NOT crash.
+7. EXPLOIT TRIGGER:
+   - Buffer overflow: use a string much larger than the target buffer.
+   - Use-After-Free: trigger the free and then trigger the use.
+   - Integer overflow: use inputs that cause the overflow.
+8. Test name: TEST(VigilantX, {path.sink.function_name.capitalize()}Vuln)
+9. Add a comment suggesting the C++20/23 fix.
 """
 
     def _try_compile(self, code: str) -> bool:
