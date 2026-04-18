@@ -203,6 +203,27 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
         logger.info("[Analysis] Running concolic engine")
         engine = ConcolicEngine()
         vulns = engine.analyze(paths)
+
+        from vigilant.fp_filter import apply_fp_filter
+        vulns, fp_dropped = apply_fp_filter(vulns, repo_path=repo_path)
+        if fp_dropped:
+            logger.info("[Analysis] FP filter dropped %d findings", len(fp_dropped))
+
+        from vigilant.analysis.context_scorer import ContextScorer
+        scorer = ContextScorer(repo_path=repo_path)
+        for i, v in enumerate(vulns):
+            if v.status in (VulnerabilityStatus.PROVEN, VulnerabilityStatus.LIKELY):
+                new_conf = scorer.score(v)
+                if new_conf < 0.60:
+                    vulns[i] = v.model_copy(update={
+                        "status": VulnerabilityStatus.WARNING,
+                        "confidence": new_conf,
+                    })
+                elif new_conf < 0.80 and v.status == VulnerabilityStatus.PROVEN:
+                    vulns[i] = v.model_copy(update={
+                        "status": VulnerabilityStatus.LIKELY,
+                        "confidence": new_conf,
+                    })
         
         # ── Deep Scan Fallback ────────────────────────────────────────────────
         # If no vulnerabilities found, or for files matching specific rules,
@@ -286,6 +307,18 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
                             "(below confidence threshold)", len(deep_findings), f_rel,
                         )
 
+            from vigilant.analysis.nitpick_engine import NitpickEngine
+            # Only nitpick files with no PROVEN/LIKELY findings
+            files_with_findings = {v.taint_path.sink.file_path for v in vulns
+                                   if v.status.value in ("PROVEN","LIKELY","SANDBOX_VERIFIED","FUZZ_VERIFIED")}
+            nitpick_engine = NitpickEngine()
+            for f_rel in (ctx.changed_files or [])[:20]:
+                if f_rel in files_with_findings:
+                    continue
+                f_path = repo_path / f_rel
+                if f_path.exists() and f_path.stat().st_size < 50_000:
+                    vulns.extend(nitpick_engine.analyze_file(f_path, repo_path=repo_path))
+
         agent.taint_paths = paths
         agent.vulnerabilities = vulns
 
@@ -331,17 +364,28 @@ def node_validate(state: dict[str, Any]) -> dict[str, Any]:
                 updated_vulns.append(vuln)  # preserve LIKELY status as-is
                 continue
 
-            if poc.content.startswith("// ADVISORY:"):
-                # LLM decided it's just an advisory during PoC generation
-                vuln = vuln.model_copy(update={"status": VulnerabilityStatus.ADVISORY})
-                updated_vulns.append(vuln)
-                continue
-
             if not agent.dry_run or settings.sandbox_always_run:
                 logger.info("[Validation] Running sandbox for %s", vuln.vuln_id[:8])
+                
+                ext = Path(vuln.taint_path.sink.file_path).suffix.lower()
+                if ext == ".py":
+                    from vigilant.validation.sandbox_runner_py import PythonSandboxRunner
+                    sandbox_inst = PythonSandboxRunner(repo_path=repo_path)
+                elif ext in (".js", ".ts", ".jsx", ".tsx", ".mjs"):
+                    from vigilant.validation.sandbox_runner_js import JSSandboxRunner
+                    sandbox_inst = JSSandboxRunner(repo_path=repo_path)
+                elif ext == ".go":
+                    from vigilant.validation.sandbox_runner_go import GoSandboxRunner
+                    sandbox_inst = GoSandboxRunner(repo_path=repo_path)
+                else:
+                    sandbox_inst = sandbox # Default C++ sandbox
+
                 # Capture sanitizer type before running so we can assess correctness
-                sanitizer_type = sandbox._infer_sanitizer(vuln)
-                result = sandbox.run(vuln, poc)
+                sanitizer_type = ""
+                if hasattr(sandbox_inst, "_infer_sanitizer"):
+                     sanitizer_type = sandbox_inst._infer_sanitizer(vuln)
+                
+                result = sandbox_inst.run(vuln, poc)
                 agent.sandbox_results[vuln.vuln_id] = result
 
                 if not result.passed and not result.compilation_error:
@@ -423,6 +467,7 @@ def node_communicate(state: dict[str, Any]) -> dict[str, Any]:
             poc_files=agent.poc_files,
             repo_path=repo_path,
             pr_intent=agent.pr_intent,
+            changed_files=ctx.changed_files,
         )
 
         commenter = PRCommenter()

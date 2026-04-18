@@ -102,38 +102,57 @@ class PoCGenerator:
 
         # Skip C++ PoC generation for non-C/C++ source files — they can't compile
         sink_ext = Path(vuln.taint_path.sink.file_path).suffix.lower()
-        if sink_ext not in (".cpp", ".cc", ".c", ".h", ".hpp", ""):
+        is_cpp = sink_ext in (".cpp", ".cc", ".c", ".h", ".hpp", "")
+        
+        lang_map = {
+            ".py": "Python",
+            ".js": "JavaScript",
+            ".ts": "TypeScript",
+            ".go": "Go"
+        }
+        target_lang = lang_map.get(sink_ext, "C++" if is_cpp else None)
+
+        if not target_lang:
             return PoCFile(
-                content=f"// SKIP: No C++ PoC for {sink_ext} file ({vuln.summary})",
+                content=f"// SKIP: No PoC generation for {sink_ext} file ({vuln.summary})",
                 mocking_framework="none",
             )
 
-        user_prompt = self._build_prompt(vuln)
-        logger.info("PoCGenerator: generating PoC for vuln %s", vuln.vuln_id[:8])
+        user_prompt = self._build_prompt(vuln, target_lang)
+        logger.info("PoCGenerator: generating %s PoC for vuln %s", target_lang, vuln.vuln_id[:8])
+
+        system_prompt = _SYSTEM_PROMPT
+        if target_lang != "C++":
+            system_prompt = (
+                f"You are a {target_lang} security researcher writing a minimal "
+                f"proof-of-concept to reproduce a vulnerability. "
+                f"Return ONLY valid {target_lang} code. No markdown."
+            )
 
         code = self.llm.ask(
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=user_prompt,
             temperature=0.15,
             max_tokens=2048,
         )
         # Strip any markdown fences
-        code = re.sub(r"```(?:cpp|c\+\+)?", "", code).strip().strip("`")
+        code = re.sub(r"```(?:\w+)?", "", code).strip().strip("`")
 
-        # Validate compilation (best-effort)
-        compile_ok = self._try_compile(code)
-        if not compile_ok:
-            logger.warning("PoCGenerator: initial compile failed, retrying with simpler prompt")
-            code = self._retry_simpler(vuln)
+        # Validate compilation (best-effort, C++ only)
+        if is_cpp:
+            compile_ok = self._try_compile(code)
+            if not compile_ok:
+                logger.warning("PoCGenerator: initial compile failed, retrying with simpler prompt")
+                code = self._retry_simpler(vuln)
 
         return PoCFile(
-            file_name="repro.cpp",
+            file_name=f"repro{sink_ext if sink_ext else '.cpp'}",
             content=code,
-            mocking_framework=self.mock_fw.detected,
-            build_flags=self.build_inf.sandbox_compiler_flags().get("flags", ""),
+            mocking_framework=self.mock_fw.detected if is_cpp else "none",
+            build_flags=self.build_inf.sandbox_compiler_flags().get("flags", "") if is_cpp else "",
         )
 
-    def _build_prompt(self, vuln: Vulnerability) -> str:
+    def _build_prompt(self, vuln: Vulnerability, target_lang: str) -> str:
         path = vuln.taint_path
         witness_str = "\n".join(
             f"  - {w.variable} = {w.value}  // {w.explanation}"
@@ -145,100 +164,32 @@ class PoCGenerator:
             if vuln.fuzz_crash_input
             else ""
         )
-
-        # For cross-file vulnerabilities, collect source file content so the LLM
-        # can include the correct headers and function signatures in the PoC.
-        cross_file_context = ""
-        if path.crosses_files:
-            src_file = self.repo_path / path.source.file_path
-            sink_file = self.repo_path / path.sink.file_path
-            src_snippet = ""
-            sink_snippet = ""
-            try:
-                if src_file.exists():
-                    lines = src_file.read_text(errors="replace").splitlines()
-                    # Include up to 60 lines around the source line
-                    start = max(0, path.source.line_number - 5)
-                    end = min(len(lines), path.source.line_number + 55)
-                    src_snippet = "\n".join(lines[start:end])
-            except Exception:
-                pass
-            try:
-                if sink_file.exists():
-                    lines = sink_file.read_text(errors="replace").splitlines()
-                    start = max(0, path.sink.line_number - 5)
-                    end = min(len(lines), path.sink.line_number + 55)
-                    sink_snippet = "\n".join(lines[start:end])
-            except Exception:
-                pass
-
-            cross_file_context = f"""
-CROSS-FILE VULNERABILITY — two separate files are involved:
-
-Source file ({path.source.file_path}), relevant excerpt:
-```cpp
-{src_snippet}
-```
-
-Sink file ({path.sink.file_path}), relevant excerpt:
-```cpp
-{sink_snippet}
-```
-
-IMPORTANT for the PoC:
-- Include BOTH files' relevant headers.
-- If the source function must be called first to set up state for the sink, call it in the test.
-- Use `extern "C"` declarations or direct includes as needed.
-- The repro must be a single self-contained .cpp file that compiles with:
-  clang++ -std=c++20 -fsanitize=address,undefined repro.cpp -lgtest -lgtest_main -lpthread -o repro
-"""
-
-        # Always provide context for the source and sink functions
-        source_context = ""
+        
+        context = ""
         try:
             src_file = self.repo_path / path.source.file_path
             if src_file.exists():
-                lines = src_file.read_text(errors="replace").splitlines()
-                # Include a window around the source
-                start = max(0, path.source.line_number - 20)
-                end = min(len(lines), path.source.line_number + 40)
-                source_context = "\n".join(lines[start:end])
+                context = f"\nRelevant code from {path.source.file_path}:\n```\n{src_file.read_text(errors='replace')[:2000]}\n```"
         except Exception:
             pass
 
         return f"""
 Vulnerability Summary: {vuln.summary}
+Language: {target_lang}
 
 Source: {path.source.function_name}() in {path.source.file_path} (line {path.source.line_number})
 Sink:   {path.sink.function_name}() in {path.sink.file_path} (line {path.sink.line_number})
-Cross-file: {path.crosses_files}
-
-Relevant code from {path.source.file_path}:
-```cpp
-{source_context}
-```
+{context}
 
 Z3 Formula: {vuln.z3_formula or "(Z3 returned unknown)"}
 
 Witness values (feed these into the vulnerable function):
 {witness_str}{fuzz_input}
-{cross_file_context}
-Mocking framework available: {self.mock_fw.detected}
-Mocking include: {self.mock_fw.include_directive}
 
-Write a single-file GoogleTest repro that:
-1. Includes <gtest/gtest.h> and any necessary project headers.
-2. CALLS the function {path.sink.function_name}() from the project. 
-3. DO NOT re-implement {path.sink.function_name}() or any other project function.
-4. Assume the project source is LINKED; use 'extern' if you don't have the header.
-5. THE GOAL is to prove that the EXISTING project code is vulnerable by calling it with specific inputs.
-6. If the project code has been FIXED (e.g. bounds checks added), your test should ideally NOT crash.
-7. EXPLOIT TRIGGER:
-   - Buffer overflow: use a string much larger than the target buffer.
-   - Use-After-Free: trigger the free and then trigger the use.
-   - Integer overflow: use inputs that cause the overflow.
-8. Test name: TEST(VigilantX, {path.sink.function_name.capitalize()}Vuln)
-9. Add a comment suggesting the C++20/23 fix.
+Write a single-file {target_lang} script that:
+1. Imports necessary modules.
+2. CALLS the function {path.sink.function_name}() from the project (mocking as needed).
+3. PROVES the vulnerability exists by triggering a crash or logical failure.
 """
 
     def _try_compile(self, code: str) -> bool:

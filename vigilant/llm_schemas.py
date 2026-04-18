@@ -19,3 +19,16 @@ class DeepScanFinding(BaseModel):
 
 class DeepScanLLMResponse(BaseModel):
     findings: list[DeepScanFinding] = []
+
+class ContextScoreLLMResponse(BaseModel):
+    score: float
+    reason: str = ""
+
+class NitpickItem(BaseModel):
+    line: int = 0
+    category: str = "style"
+    comment: str = ""
+    suggestion: str = ""
+
+class NitpickLLMResponse(BaseModel):
+    nitpicks: list[NitpickItem] = []

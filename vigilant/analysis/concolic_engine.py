@@ -476,7 +476,95 @@ class Z3Solver:
             }
             return sym_vars, constraints, formula_parts
 
+        # ── Python command injection: os.system / subprocess.run ────────────────
+        if sink_name in ("os.system", "subprocess.run", "subprocess.call",
+                         "subprocess.Popen", "eval", "exec"):
+            shell_input = z3.Bool("shell_input_user_controlled")
+            sanitized   = z3.Bool("input_sanitized")
+            constraints = [shell_input, z3.Not(sanitized)]
+            formula_parts = [
+                "shell_input_user_controlled == True",
+                "input_sanitized == False  (no shlex.quote or allowlist)",
+            ]
+            sym_vars = {"shell_input_user_controlled": shell_input,
+                        "input_sanitized": sanitized}
+            return sym_vars, constraints, formula_parts
+
+        # ── Python deserialization: pickle.loads / yaml.load ─────────────────────
+        if sink_name in ("pickle.loads", "pickle.load", "yaml.load",
+                         "marshal.loads", "jsonpickle.decode"):
+            untrusted = z3.Bool("data_from_untrusted_source")
+            safe_loader = z3.Bool("uses_safe_loader")  # yaml.safe_load / yaml.FullLoader
+            constraints = [untrusted, z3.Not(safe_loader)]
+            formula_parts = [
+                "data_from_untrusted_source == True",
+                "uses_safe_loader == False  (missing Loader=yaml.SafeLoader)",
+            ]
+            sym_vars = {"untrusted": untrusted, "safe_loader": safe_loader}
+            return sym_vars, constraints, formula_parts
+
+        # ── Python SSRF: requests.get with user-controlled URL ───────────────────
+        if sink_name in ("requests.get", "requests.post", "requests.put",
+                         "urllib.request.urlopen", "httpx.get", "aiohttp.ClientSession"):
+            user_url = z3.Bool("url_user_controlled")
+            allowlisted = z3.Bool("url_in_allowlist")
+            constraints = [user_url, z3.Not(allowlisted)]
+            formula_parts = ["url_user_controlled == True", "url_in_allowlist == False"]
+            sym_vars = {"user_url": user_url, "allowlisted": allowlisted}
+            return sym_vars, constraints, formula_parts
+
+        # ── JS prototype pollution: __proto__ / constructor.prototype ────────────
+        if sink_name in ("__proto__", "constructor.prototype", "Object.assign",
+                         "lodash.merge", "_.merge", "deepmerge"):
+            key_user_controlled = z3.Bool("object_key_user_controlled")
+            key_sanitized       = z3.Bool("key_sanitized_against_proto")
+            constraints = [key_user_controlled, z3.Not(key_sanitized)]
+            formula_parts = [
+                "object_key_user_controlled == True",
+                "key_sanitized_against_proto == False  (no __proto__ check)",
+            ]
+            sym_vars = {"key_user_controlled": key_user_controlled,
+                        "key_sanitized": key_sanitized}
+            return sym_vars, constraints, formula_parts
+
+        # ── JS eval / Function() injection ───────────────────────────────────────
+        if sink_name in ("eval", "Function", "setTimeout", "setInterval",
+                         "new Function"):
+            arg_user_controlled = z3.Bool("eval_arg_user_controlled")
+            constraints = [arg_user_controlled]
+            formula_parts = ["eval_arg_user_controlled == True"]
+            sym_vars = {"eval_arg_user_controlled": arg_user_controlled}
+            return sym_vars, constraints, formula_parts
+
+        # ── Go SQL injection: db.Query with fmt.Sprintf ──────────────────────────
+        if sink_name in ("db.Query", "db.QueryRow", "db.Exec",
+                         "tx.Query", "tx.Exec"):
+            concat_query = z3.Bool("query_uses_string_concat")
+            parameterized = z3.Bool("query_uses_placeholders")
+            constraints = [concat_query, z3.Not(parameterized)]
+            formula_parts = [
+                "query_uses_string_concat == True  (fmt.Sprintf or + concatenation)",
+                "query_uses_placeholders == False  (no $1/$2 placeholders)",
+            ]
+            sym_vars = {"concat_query": concat_query, "parameterized": parameterized}
+            return sym_vars, constraints, formula_parts
+
+        # ── Java deserialization: ObjectInputStream.readObject ───────────────────
+        if sink_name in ("readObject", "readUnshared", "XStream.fromXML",
+                         "ObjectMapper.readValue"):
+            untrusted_stream = z3.Bool("stream_from_untrusted_source")
+            has_allowlist    = z3.Bool("has_deserialization_allowlist")
+            constraints = [untrusted_stream, z3.Not(has_allowlist)]
+            formula_parts = [
+                "stream_from_untrusted_source == True",
+                "has_deserialization_allowlist == False",
+            ]
+            sym_vars = {"untrusted_stream": untrusted_stream,
+                        "has_allowlist": has_allowlist}
+            return sym_vars, constraints, formula_parts
+
         # ── 2. LLM-based Transpilation (Fallback) ─────────────────────────────
+
         # If no LLM configured, fallback to basic reachability
         if not self.llm:
             reachable = z3.Bool(f"{sink_name}_reachable")
@@ -774,7 +862,9 @@ class ConcolicEngine:
                 confidence = 0.2
 
             # Detect uninit-read pattern — these require MSan not ASan
-            needs_msan = "is_initialized" in clean_formula
+            needs_msan = ("is_initialized" in clean_formula or
+                          "uninit" in clean_formula.lower() or
+                          "CWE457" in (path.rule_id or ""))
 
             return Vulnerability(
                 vuln_id=vuln_id, taint_path=path, status=actual_status,

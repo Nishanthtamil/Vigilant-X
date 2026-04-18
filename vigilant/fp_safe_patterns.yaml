@@ -1,0 +1,44 @@
+# vigilant/fp_safe_patterns.yaml
+# Operator-extensible safe-pattern overrides.
+# Add entries here to suppress FPs without modifying Python code.
+# Format: framework_or_global → list of safe sink/intermediate names.
+
+global:
+  - std::vector::push_back
+  - std::make_unique
+  - std::string_view
+  - logging.getLogger
+  - console.log          # not a security sink despite js_no_console_log rule
+
+django:
+  - filter
+  - exclude
+  - get
+  - create
+  - bulk_create
+  - update_or_create
+  - values
+  - values_list
+  - prefetch_related
+  - select_related
+  - annotate
+  - aggregate
+
+flask:
+  - render_template      # safe; render_template_string is the dangerous one
+  - jsonify
+  - abort
+
+express:
+  - res.json
+  - res.status
+  - res.sendStatus
+  - next                 # Express middleware next() is not a sink
+
+rails:
+  - where                # where(name: val) — parameterized, safe
+  - find
+  - find_by
+  - create
+  - update
+  - destroy
