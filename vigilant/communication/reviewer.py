@@ -112,11 +112,6 @@ class Reviewer:
             v for v in vulnerabilities
             if v.status == VulnerabilityStatus.LIKELY
         ]
-        proven_unverified = [
-            v for v in vulnerabilities
-            if v.status == VulnerabilityStatus.PROVEN
-            and v.vuln_id not in {v2.vuln_id for v2 in verified_vulns}
-        ]
 
         # ── Generate fix for each verified vuln ───────────────────────────────
         for vuln in verified_vulns:

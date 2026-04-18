@@ -326,6 +326,11 @@ def node_validate(state: dict[str, Any]) -> dict[str, Any]:
             poc = poc_gen.generate(vuln)
             agent.poc_files[vuln.vuln_id] = poc
 
+            # Skip sandbox for non-C++ findings — the PoC is a stub
+            if poc.content.startswith("// SKIP:"):
+                updated_vulns.append(vuln)  # preserve LIKELY status as-is
+                continue
+
             if poc.content.startswith("// ADVISORY:"):
                 # LLM decided it's just an advisory during PoC generation
                 vuln = vuln.model_copy(update={"status": VulnerabilityStatus.ADVISORY})

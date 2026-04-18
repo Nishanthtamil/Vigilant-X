@@ -144,7 +144,15 @@ def review(
         }
         for v in final_state.vulnerabilities
     )
-    raise typer.Exit(code=1 if has_verified else 0)
+    has_likely = any(v.status == VulnerabilityStatus.LIKELY for v in final_state.vulnerabilities)
+
+    # Exit 1 = confirmed bugs. Exit 2 = Z3-proven but unconfirmed. Exit 0 = clean.
+    if has_verified:
+        raise typer.Exit(code=1)
+    elif has_likely:
+        raise typer.Exit(code=2)
+    else:
+        raise typer.Exit(code=0)
 
 
 def _git_changed_files(repo: Path, base: str, head: str) -> list[str]:

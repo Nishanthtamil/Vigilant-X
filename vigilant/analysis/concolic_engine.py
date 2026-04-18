@@ -180,12 +180,16 @@ class Z3Solver:
         try:
             with self.builder.driver.session() as s:
                 rec = s.run(
-                    "MATCH (c:ProofCache {key:$k}) RETURN c.status AS st, c.formula AS f",
+                    "MATCH (c:ProofCache {key:$k}) "
+                    "RETURN c.status AS st, c.formula AS f, c.is_reachability_only AS ro",
                     k=key,
                 ).single()
                 if rec:
                     logger.info("Z3: cache hit for %s", path.path_id[:8])
-                    return VulnerabilityStatus(rec["st"]), [], rec["f"] or ""
+                    formula = rec["f"] or ""
+                    if rec.get("ro"):
+                        formula = "REACHABILITY_ONLY: " + formula
+                    return VulnerabilityStatus(rec["st"]), [], formula
         except Exception:
             pass  # cache unavailable — proceed normally
 
@@ -194,11 +198,13 @@ class Z3Solver:
 
         # Store result
         try:
+            is_reachability_only = formula.startswith("REACHABILITY_ONLY: ")
+            clean_formula = formula.removeprefix("REACHABILITY_ONLY: ")
             with self.builder.driver.session() as s:
                 s.run(
                     "MERGE (c:ProofCache {key:$k}) "
-                    "SET c.status=$st, c.formula=$f, c.updated=datetime()",
-                    k=key, st=status.value, f=formula,
+                    "SET c.status=$st, c.formula=$f, c.is_reachability_only=$ro, c.updated=datetime()",
+                    k=key, st=status.value, f=clean_formula, ro=is_reachability_only,
                 )
         except Exception:
             pass  # cache write failure is non-fatal

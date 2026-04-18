@@ -41,8 +41,8 @@ CRASH_PATTERNS = [
     (re.compile(r"data race", re.I), "data-race", "TSan"),
     (re.compile(r"use of uninitialized value", re.I), "uninit-value", "MSan"),
     (re.compile(r"SUMMARY: UndefinedBehaviorSanitizer", re.I), "undefined-behavior", "UBSan"),
-    (re.compile(r"SUMMARY: AddressSanitizer", re.I), "asan-crash", "ASan"),
     (re.compile(r"SUMMARY: MemorySanitizer", re.I), "msan-crash", "MSan"),
+    (re.compile(r"SUMMARY: AddressSanitizer", re.I), "asan-crash", "ASan"),
 ]
 
 STACK_TRACE_RE = re.compile(
@@ -100,8 +100,7 @@ class SandboxRunner:
                 logger.info("SandboxRunner: running matrix entry (%s, %s)", opt_level, compiler_override)
                 compile_cmd = self._build_compile_cmd(
                     repro_src, compiler_info, poc.content, sanitizer_type, 
-                    file_meta.get("flags", []), opt_level, compiler_override,
-                    original_src=Path(vuln.taint_path.source.file_path)
+                    file_meta.get("flags", []), opt_level, compiler_override
                 )
                 
                 # Determine if this is an override compared to project defaults
@@ -236,43 +235,27 @@ class SandboxRunner:
 
     def _build_compile_cmd(
         self, src: Path, compiler_info: dict, poc_content: str = "", sanitizer: str = "address,undefined",
-        extra_flags: list[str] | None = None, opt_level: str = "-O1", compiler_override: str = "clang++",
-        original_src: Path | None = None
+        extra_flags: list[str] | None = None, opt_level: str = "-O1", compiler_override: str = "clang++"
     ) -> list[str]:
-        # Always prefer clang++ for sanitizer compatibility; g++ for cross-verification if available
         compiler = compiler_override
-
         flags = [f"-fsanitize={sanitizer}", "-fno-omit-frame-pointer", "-g", opt_level]
         libs = ["-lpthread"]
 
         if sanitizer == "memory":
-            # MSan requires track-origins for better debugging
-            flags.append("-fsanitize-memory-track-origins")
-            # Use our custom instrumented libc++ if it exists (fallback to system if build failed)
-            # For this environment, we'll stick to standard libc++ but keep the MSan flag
             flags.extend([
+                "-fsanitize-memory-track-origins",
                 "-stdlib=libc++",
+                "-I/msan-libs/include/c++/v1",
+                "-L/msan-libs/lib",
             ])
-            libs.extend(["-lgtest"]) 
+            libs.extend(["-lgtest", "-lc++", "-lc++abi", "-Wl,-rpath,/msan-libs/lib"])
         else:
             libs.append("-lgtest")
 
-        # The src Path is within the temp directory, which is mounted to /workspace/build in the container.
-        # Inside the container, it's just src.name.
-        container_src = [src.name]
-        
-        # If we have original source, mount it and include it in compilation
-        if original_src:
-            # Repo is mounted at /repo
-            # We use -Dmain=... to avoid entry point conflicts if the source has a main()
-            container_src.append(f"-Dmain=vigilant_original_main /repo/{original_src.as_posix()}")
-
-        cmd = [compiler, "-std=c++20"] + container_src + flags + (extra_flags or []) + libs + ["-o", "repro"]
-        
+        cmd = [compiler, "-std=c++20", src.name] + flags + (extra_flags or []) + libs + ["-o", "repro"]
         if "int main(" not in poc_content:
             cmd.append("-lgtest_main")
         return cmd
-
     def _resolve_image(self) -> str:
         """
         Always use the trusted Vigilant-X sandbox image.

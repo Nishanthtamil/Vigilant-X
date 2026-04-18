@@ -100,6 +100,14 @@ class PoCGenerator:
                 mocking_framework="none",
             )
 
+        # Skip C++ PoC generation for non-C/C++ source files — they can't compile
+        sink_ext = Path(vuln.taint_path.sink.file_path).suffix.lower()
+        if sink_ext not in (".cpp", ".cc", ".c", ".h", ".hpp", ""):
+            return PoCFile(
+                content=f"// SKIP: No C++ PoC for {sink_ext} file ({vuln.summary})",
+                mocking_framework="none",
+            )
+
         user_prompt = self._build_prompt(vuln)
         logger.info("PoCGenerator: generating PoC for vuln %s", vuln.vuln_id[:8])
 
