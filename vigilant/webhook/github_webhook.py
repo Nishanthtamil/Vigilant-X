@@ -22,7 +22,7 @@ from vigilant.llm_client import LLMClient
 logger = logging.getLogger(__name__)
 app = FastAPI()
 
-COMMAND_RE = re.compile(r" @vigilant/\*\*(?:-x)?\s+(?P<cmd>\S+)(?:\s+(?P<args>.+))?", re.I)
+COMMAND_RE = re.compile(r" @vigilant(?:-x)?\s+(?P<cmd>\S+)(?:\s+(?P<args>.+))?", re.I)
 
 async def _handle_explain(args: str, payload: dict) -> None:
     llm = LLMClient()

@@ -627,6 +627,3 @@ Provide the root cause explanation and a C++20/23 fix suggestion.
             "— Formal verification + sandboxed proof-of-concept analysis._",
         ]
         return "\n".join(parts)
--of-concept analysis._",
-        ]
-        return "\n".join(parts)
