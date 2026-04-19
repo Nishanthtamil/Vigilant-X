@@ -92,7 +92,7 @@ def main():
     elapsed = time.time() - start
     p_ = tp/(tp+fp) if tp+fp else 0
     r_ = tp/(tp+fn) if tp+fn else 0
-    f1 = 2*p_*r_/(p_+r_) if p_*r_ else 0
+    f1 = 2*p_*r_/(p_+r_) if p_+r_ else 0
     res = {"dataset":"CVEfixes","lang":args.lang,"date":datetime.utcnow().isoformat(),
            "n_rows":len(rows),"tp":tp,"fp":fp,"tn":tn,"fn":fn,
            "precision":round(p_,3),"recall":round(r_,3),"f1":round(f1,3),
