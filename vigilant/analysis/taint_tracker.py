@@ -174,7 +174,7 @@ WHERE sink.function_name IN $sinks
 CALL apoc.path.expandConfig(source, {
     relationshipFilter: "CALL>|REACHING_DEF>|REF>|ALIAS>|CFG>|AST>|ARGUMENT>|RECEIVER>",
     minLevel: 1,
-    maxLevel: 30,
+    maxLevel: 15,
     terminatorNodes: [sink],
     uniqueness: "NODE_PATH"
 })
