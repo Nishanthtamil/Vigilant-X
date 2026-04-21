@@ -58,3 +58,5 @@ scripts/*.cpg
 # Results
 vigilant-results.sarif
 **/vigilant-results.sarif
+benchmarks/juliet_v1-3.zip
+benchmarks/juliet/
