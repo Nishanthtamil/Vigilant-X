@@ -5,7 +5,8 @@
 
 # Benchmark scratch directory (generated at runtime)
 benchmarks/mock_repo/
-
+benchmarks/juliet_raw/C
+benchmarks/juliet
 # Python
 __pycache__/
 *.py[cod]
