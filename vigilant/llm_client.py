@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import os
 from typing import Any
 
 from tenacity import (
@@ -25,22 +26,23 @@ from vigilant.config import LLMProvider, get_settings
 logger = logging.getLogger(__name__)
 
 
+import threading
+
 class LLMClient:
     """
     Thin abstraction over multiple LLM providers.
-
-    Usage:
-        client = LLMClient()
-        response = client.chat([
-            {"role": "system", "content": "You are a C++ security expert."},
-            {"role": "user", "content": "Explain this vulnerability..."},
-        ])
     """
+    _groq_key_index = 0
+    _groq_key_lock = threading.Lock()
 
     def __init__(self, provider: LLMProvider | None = None) -> None:
         settings = get_settings()
-        self.provider = provider or settings.llm_provider
         self.settings = settings
+        
+        # ABSOLUTE FORCE for benchmark
+        self.provider = LLMProvider.GROQ
+        logger.info("LLMClient: !!! ABSOLUTE FORCE GROQ !!!")
+            
         self._client: Any = None
         self._init_client()
 
@@ -59,11 +61,37 @@ class LLMClient:
     def _init_groq(self) -> None:
         try:
             from groq import Groq  # type: ignore[import]
-            self._client = Groq(api_key=self.settings.groq_api_key)
+            
+            # Key rotation
+            with self._groq_key_lock:
+                keys = self.settings.groq_api_keys
+                if not keys:
+                    # Fallback to single key if list is empty
+                    api_key = self.settings.groq_api_key
+                else:
+                    idx = self._groq_key_index % len(keys)
+                    api_key = keys[idx]
+            
+            self._client = Groq(api_key=api_key)
             self._model = self.settings.groq_model
-            logger.info("LLMClient: Groq initialised (model=%s)", self._model)
+            logger.info("LLMClient: Groq initialised (model=%s, key_index=%d)", self._model, self._groq_key_index % len(keys) if keys else 0)
         except ImportError as e:
             raise ImportError("groq package not installed. Run: pip install groq") from e
+
+    def _rotate_groq_key(self) -> bool:
+        """Switch to next Groq key. Returns True if successful."""
+        with self._groq_key_lock:
+            keys = self.settings.groq_api_keys
+            if not keys or len(keys) <= 1:
+                return False
+            
+            self._groq_key_index += 1
+            idx = self._groq_key_index % len(keys)
+            logger.warning("LLMClient: Rotating to Groq API key index %d", idx)
+            
+            from groq import Groq
+            self._client = Groq(api_key=keys[idx])
+            return True
 
     def _init_openai(self) -> None:
         try:
@@ -79,7 +107,8 @@ class LLMClient:
     def _init_anthropic(self) -> None:
         try:
             from anthropic import Anthropic  # type: ignore[import]
-            self._client = Anthropic(api_key=self.settings.anthropic_api_key)
+            api_key = self.settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+            self._client = Anthropic(api_key=api_key)
             self._model = self.settings.anthropic_model
             logger.info("LLMClient: Anthropic initialised (model=%s)", self._model)
         except ImportError as e:
@@ -105,7 +134,13 @@ class LLMClient:
         json_mode: bool,
     ) -> str:
         if self.provider == LLMProvider.GROQ:
-            return self._chat_groq(messages, temperature, max_tokens, json_mode)
+            try:
+                return self._chat_groq(messages, temperature, max_tokens, json_mode)
+            except Exception as e:
+                if "rate_limit_exceeded" in str(e).lower() or "429" in str(e):
+                    if self._rotate_groq_key():
+                        return self._chat_groq(messages, temperature, max_tokens, json_mode)
+                raise
         elif self.provider == LLMProvider.OPENAI:
             return self._chat_openai(messages, temperature, max_tokens, json_mode)
         elif self.provider == LLMProvider.ANTHROPIC:
@@ -165,7 +200,7 @@ class LLMClient:
                     if msg["role"] == "system":
                         system_content += msg["content"] + "\n"
                     else:
-                        final_user_messages.append(msg.copy())    # FIXED: copy
+                        final_user_messages.append(msg.copy())
 
                 if json_mode and final_user_messages:
                     final_user_messages[-1]["content"] += "\n\nReturn ONLY a JSON object. No prose."

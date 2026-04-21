@@ -56,6 +56,36 @@ def build_safe_set(repo_path: Path | None) -> set[str]:
             safe.update(profile.get("safe_patterns", []))
     return safe
 
+import re as _re
+
+# Patterns that indicate a dangerous call is already guarded
+_BOUNDS_CHECK_RE = _re.compile(
+    r'if\s*\([^)]*(?:len|size|length|sizeof|strlen|count|n)\s*[<>=!]=?\s*\d',
+    _re.IGNORECASE,
+)
+_DANGEROUS_GUARDED_SINKS = {"memcpy", "memmove", "strncpy", "memset"}
+
+def _has_local_bounds_check(vuln: Vulnerability, repo_path=None) -> bool:
+    """
+    Return True if the sink call is visibly inside a bounds-checked block.
+    Reads ±10 lines around the sink line. Fast pre-filter before LLM.
+    """
+    if vuln.taint_path.sink.function_name not in _DANGEROUS_GUARDED_SINKS:
+        return False
+    if not repo_path:
+        return False
+    try:
+        p = Path(repo_path) / vuln.taint_path.sink.file_path
+        if not p.exists():
+            return False
+        lines = p.read_text(errors="replace").splitlines()
+        line = vuln.taint_path.sink.line_number
+        # Look at 10 lines before the sink for an if(...size...) guard
+        window = "\n".join(lines[max(0, line - 10): line + 2])
+        return bool(_BOUNDS_CHECK_RE.search(window))
+    except Exception:
+        return False
+
 def apply_fp_filter(
     vulns: list[Vulnerability],
     repo_path: Path | None = None,
@@ -69,6 +99,7 @@ def apply_fp_filter(
        a high-confidence critical sink → demote PROVEN→LIKELY.
     3. Source and sink are the same node AND path length == 1 (stub CPG
        artifact) → drop as likely false positive.
+    4. Sink is inside a visible bounds-checked block → demote to WARNING.
     """
     safe = build_safe_set(repo_path)
     HIGH_CONFIDENCE_SINKS = {
@@ -97,9 +128,22 @@ def apply_fp_filter(
 
         # Rule 3: trivial self-loop (stub CPG artifact)
         if p.source.node_id == p.sink.node_id and not p.intermediate_nodes:
+            # EXEMPT: Deep Scan findings (LLM-only) naturally have same source/sink
+            if p.sink.function_name == "DeepScan":
+                kept.append(v)
+                continue
+                
             logger.info("FP filter: dropping %s — self-loop stub artifact", v.vuln_id[:8])
             dropped.append(v)
             continue
+
+        # Rule 4: sink is inside a visible bounds-checked block → demote to WARNING
+        if _has_local_bounds_check(v, repo_path) and v.status == VulnerabilityStatus.PROVEN:
+            v = v.model_copy(update={
+                "status": VulnerabilityStatus.WARNING,
+                "confidence": min(v.confidence, 0.55),
+            })
+            logger.info("FP filter: demoting %s PROVEN→WARNING (local bounds check)", v.vuln_id[:8])
 
         kept.append(v)
 

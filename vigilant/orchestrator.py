@@ -54,25 +54,16 @@ class _RateLimiter:
             self._last = time.monotonic()
 
 
-_LLM_RATE_LIMITER = _RateLimiter(rps=0.4)  # 24 RPM sustained — safe under Groq 30 RPM free tier
+_LLM_RATE_LIMITER = _RateLimiter(rps=0.15)  # 9 RPM sustained - extremely safe for 90k TPM budget
 
 
 class DeepScanBudget:
     """
     Controls Deep Scan concurrency and total file budget per PR run.
-
-    Priority rules:
-    - Files touched in the PR diff score higher than unchanged files.
-    - Files with CRITICAL-severity matching rules score higher.
-    - Files already covered by taint tracking are excluded.
-
-    Rate limiting:
-    - A threading.Semaphore caps concurrent LLM calls to avoid 429s.
-    - Hard cap: never scan more than MAX_FILES_PER_RUN files per pipeline run.
     """
 
     MAX_FILES_PER_RUN   = 40    # absolute ceiling across all files
-    MAX_CONCURRENT      = 4     # simultaneous LLM calls
+    MAX_CONCURRENT      = 1     # Serial execution to avoid token-burst 429s
     HIGH_PRIORITY_EXTS  = {".cpp", ".cc", ".c", ".py", ".ts", ".js"}
 
     def __init__(self) -> None:
@@ -185,12 +176,13 @@ def node_ingest(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
-    """Plane II — Taint tracking + concolic analysis + Deep Scan fallback."""
+    """Plane II — Taint tracking + concolic analysis + Parallel Deep Scan."""
     agent = AgentState(**state)
     ctx = agent.pr_context
     repo_path = Path(ctx.repo_path) if ctx else None
 
     try:
+        # ── Phase 1: Graph-based taint analysis ─────────────────────────────
         logger.info("[Analysis] Running taint tracker")
         code_law = CodeLaw(repo_path=repo_path)
         tracker = TaintTracker(code_law=code_law, repo_path=repo_path)
@@ -202,47 +194,13 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
 
         logger.info("[Analysis] Running concolic engine")
         engine = ConcolicEngine()
-        vulns = engine.analyze(paths)
+        graph_vulns = engine.analyze(paths)
 
-        from vigilant.fp_filter import apply_fp_filter
-        vulns, fp_dropped = apply_fp_filter(vulns, repo_path=repo_path)
-        if fp_dropped:
-            logger.info("[Analysis] FP filter dropped %d findings", len(fp_dropped))
-
-        from vigilant.analysis.context_scorer import ContextScorer
-        scorer = ContextScorer(repo_path=repo_path)
-        for i, v in enumerate(vulns):
-            if v.status in (VulnerabilityStatus.PROVEN, VulnerabilityStatus.LIKELY):
-                new_conf = scorer.score(v)
-                if new_conf < 0.60:
-                    vulns[i] = v.model_copy(update={
-                        "status": VulnerabilityStatus.WARNING,
-                        "confidence": new_conf,
-                    })
-                elif new_conf < 0.80 and v.status == VulnerabilityStatus.PROVEN:
-                    vulns[i] = v.model_copy(update={
-                        "status": VulnerabilityStatus.LIKELY,
-                        "confidence": new_conf,
-                    })
-        
-        # ── Deep Scan Fallback ────────────────────────────────────────────────
-        # If no vulnerabilities found, or for files matching specific rules,
-        # perform a direct LLM-powered review of the file content.
+        # ── Phase 2: LLM Deep Scan — ALWAYS runs, independent of Phase 1 ───
+        # Phase 1 finds cross-file flow. Phase 2 finds local patterns.
+        # Both are needed. Neither is a fallback for the other.
+        deep_scan_vulns = []
         if ctx:
-            def _to_relative(p: str, base: Path) -> str:
-                try:
-                    return Path(p).relative_to(base).as_posix()
-                except ValueError:
-                    return p
-
-            # Files already covered by graph-based taint tracking — skip Deep Scan for these.
-            # Normalize to repo-relative POSIX strings for reliable comparison.
-            files_with_taint_vulns = set()
-            for v in vulns:
-                raw = v.taint_path.sink.file_path
-                norm = _to_relative(raw, repo_path) if repo_path else raw
-                files_with_taint_vulns.add(norm)
-
             files_to_scan = (
                 ctx.changed_files
                 if ctx.changed_files
@@ -253,30 +211,11 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
                 ]
             )
 
-            logger.info("[Analysis] Files for Deep Scan: %s", files_to_scan)
-
-            def _run_deep_scan(args):
-                f_rel, f_path, rules = args
-                return engine.deep_scan(f_path, rules, repo_path=repo_path)
-
             scan_args = []
             for f_rel in files_to_scan:
-                # Normalize the candidate path the same way files_with_taint_vulns was built
-                f_rel_norm = _to_relative(str(repo_path / f_rel), repo_path) if repo_path else f_rel
-
-                # Skip if taint tracking already found something in this file
-                if f_rel_norm in files_with_taint_vulns:
-                    logger.info(
-                        "[Analysis] Skipping Deep Scan for %s (taint tracker already has findings)",
-                        f_rel,
-                    )
-                    continue
-
                 f_path = repo_path / f_rel
                 if not f_path.exists():
-                    logger.warning("[Analysis] Deep Scan: file not found %s", f_path)
                     continue
-
                 matching_rules = code_law.rules_for_file(f_rel)
                 if matching_rules:
                     scan_args.append((f_rel, f_path, matching_rules))
@@ -284,47 +223,102 @@ def node_analyze(state: dict[str, Any]) -> dict[str, Any]:
             if scan_args:
                 logger.info("[Analysis] Launching Deep Scan for %d files (budget-controlled)", len(scan_args))
                 budget = DeepScanBudget()
-
                 scan_results = budget.run_with_budget(
                     scan_args=scan_args,
-                    runner_fn=_run_deep_scan,
-                    changed_files=ctx.changed_files if ctx else [],
+                    runner_fn=lambda args: engine.deep_scan(
+                        args[1], args[2], repo_path=repo_path
+                    ),
+                    changed_files=ctx.changed_files or [],
                 )
+                for f_rel, findings in scan_results:
+                    deep_scan_vulns.extend(findings)
 
-                for f_rel, deep_findings in scan_results:
-                    _DEEP_SCAN_MIN_CONFIDENCE = 0.85
-                    filtered = [f for f in deep_findings if f.confidence >= _DEEP_SCAN_MIN_CONFIDENCE]
-                    
-                    if filtered:
-                        logger.info(
-                            "[Analysis] Deep Scan: %d/%d findings kept for %s",
-                            len(filtered), len(deep_findings), f_rel,
-                        )
-                        vulns.extend(filtered)
-                    elif deep_findings:
-                        logger.info(
-                            "[Analysis] Deep Scan: all %d findings for %s dropped "
-                            "(below confidence threshold)", len(deep_findings), f_rel,
-                        )
+        # ── Phase 3: Merge and deduplicate ──────────────────────────────────
+        # Graph vulns are higher confidence — they have Z3 proofs and paths.
+        # Deep scan vulns fill in what the graph missed.
+        # Deduplicate by (file, line, sink_name) to avoid double-reporting.
+        all_vulns = list(graph_vulns)
+        
+        graph_keys = {
+            (v.taint_path.sink.file_path, 
+             v.taint_path.sink.line_number,
+             v.taint_path.sink.function_name)
+            for v in graph_vulns
+        }
+        
+        logger.info("[Analysis] Merging %d graph findings and %d deep scan findings", len(graph_vulns), len(deep_scan_vulns))
 
-            from vigilant.analysis.nitpick_engine import NitpickEngine
-            # Only nitpick files with no PROVEN/LIKELY findings
-            files_with_findings = {v.taint_path.sink.file_path for v in vulns
-                                   if v.status.value in ("PROVEN","LIKELY","SANDBOX_VERIFIED","FUZZ_VERIFIED")}
-            nitpick_engine = NitpickEngine()
-            for f_rel in (ctx.changed_files or [])[:20]:
-                if f_rel in files_with_findings:
-                    continue
-                f_path = repo_path / f_rel
-                if f_path.exists() and f_path.stat().st_size < 50_000:
-                    vulns.extend(nitpick_engine.analyze_file(f_path, repo_path=repo_path))
+        for v in deep_scan_vulns:
+            key = (
+                v.taint_path.sink.file_path,
+                v.taint_path.sink.line_number,
+                v.taint_path.sink.function_name,
+            )
+            # Add deep scan finding only if graph analysis didn't already cover it
+            # OR if graph found it too, upgrade the confidence
+            if key not in graph_keys:
+                _DEEP_SCAN_MIN_CONFIDENCE = 0.70
+                if v.confidence >= _DEEP_SCAN_MIN_CONFIDENCE:
+                    logger.info("[Analysis] Keeping deep scan finding: %s at %d (conf: %.2f)", v.vuln_id[:8], v.taint_path.sink.line_number, v.confidence)
+                    all_vulns.append(v)
+                else:
+                    logger.info("[Analysis] Dropping deep scan finding: %s (conf: %.2f < %.2f)", v.vuln_id[:8], v.confidence, _DEEP_SCAN_MIN_CONFIDENCE)
+            else:
+                # Graph already found this — boost confidence if deep scan agrees
+                for i, gv in enumerate(all_vulns):
+                    gkey = (
+                        gv.taint_path.sink.file_path,
+                        gv.taint_path.sink.line_number,
+                        gv.taint_path.sink.function_name,
+                    )
+                    if gkey == key:
+                        boosted = min(gv.confidence + 0.10, 0.99)
+                        logger.info("[Analysis] Boosting graph finding %s confidence: %.2f -> %.2f", gv.vuln_id[:8], gv.confidence, boosted)
+                        all_vulns[i] = gv.model_copy(
+                            update={"confidence": boosted}
+                        )
+                        break
+
+        # FP filter and context scoring applied to merged results
+        from vigilant.fp_filter import apply_fp_filter
+        all_vulns, fp_dropped = apply_fp_filter(all_vulns, repo_path=repo_path)
+        if fp_dropped:
+            logger.info("[Analysis] FP filter dropped %d findings", len(fp_dropped))
+
+        from vigilant.analysis.context_scorer import ContextScorer
+        scorer = ContextScorer(repo_path=repo_path)
+        for i, v in enumerate(all_vulns):
+            if v.status in (VulnerabilityStatus.PROVEN, VulnerabilityStatus.LIKELY):
+                new_conf = scorer.score(v)
+                if new_conf < 0.60:
+                    all_vulns[i] = v.model_copy(update={
+                        "status": VulnerabilityStatus.WARNING,
+                        "confidence": new_conf,
+                    })
+                elif new_conf < 0.80 and v.status == VulnerabilityStatus.PROVEN:
+                    all_vulns[i] = v.model_copy(update={
+                        "status": VulnerabilityStatus.LIKELY,
+                        "confidence": new_conf,
+                    })
+
+        from vigilant.analysis.nitpick_engine import NitpickEngine
+        # Only nitpick files with no PROVEN/LIKELY findings
+        files_with_findings = {v.taint_path.sink.file_path for v in all_vulns
+                               if v.status.value in ("PROVEN","LIKELY","SANDBOX_VERIFIED","FUZZ_VERIFIED")}
+        nitpick_engine = NitpickEngine()
+        for f_rel in (ctx.changed_files or [])[:20]:
+            if f_rel in files_with_findings:
+                continue
+            f_path = repo_path / f_rel
+            if f_path.exists() and f_path.stat().st_size < 50_000:
+                all_vulns.extend(nitpick_engine.analyze_file(f_path, repo_path=repo_path))
 
         agent.taint_paths = paths
-        agent.vulnerabilities = vulns
+        agent.vulnerabilities = all_vulns
 
-        proven = sum(1 for v in vulns if v.status == VulnerabilityStatus.PROVEN)
-        fuzz = sum(1 for v in vulns if v.status == VulnerabilityStatus.FUZZ_VERIFIED)
-        advisory = sum(1 for v in vulns if v.status == VulnerabilityStatus.ADVISORY)
+        proven = sum(1 for v in all_vulns if v.status == VulnerabilityStatus.PROVEN)
+        fuzz = sum(1 for v in all_vulns if v.status == VulnerabilityStatus.FUZZ_VERIFIED)
+        advisory = sum(1 for v in all_vulns if v.status == VulnerabilityStatus.ADVISORY)
         logger.info("[Analysis] Proven=%d FuzzVerified=%d Advisory=%d", proven, fuzz, advisory)
 
     except Exception as e:

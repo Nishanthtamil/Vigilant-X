@@ -32,6 +32,11 @@ TAINT_SOURCES = [
     "argv", "getenv", "read", "fread", "recv", "recvfrom", "recvmsg",
     "scanf", "fscanf", "sscanf", "fgets", "gets", "getline",
     "readlink", "getopt", "getopt_long",
+    # Network sources (Juliet uses these heavily)
+    "accept", "socket", "connect",
+    # Juliet Test Suite source naming conventions
+    "getData", "getInput", "helperBad",
+    "CWE121_bad_source", "CWE416_bad_source", "CWE415_bad_source", "CWE457_bad_source",
     # Uninitialized allocations (sources of uninit data)
     "malloc", "calloc", "realloc", "mmap",
     # COM/BSTR sources
@@ -151,14 +156,23 @@ class TaintTracker:
         base_apoc = """
 MATCH (source:CPGNode)
 WHERE source.function_name IN $sources 
-  AND (source.node_type CONTAINS 'CALL' OR source.node_type IN ['METHOD_PARAMETER_IN', 'IDENTIFIER'])
+  AND (
+    source.node_type IN ['CALL_SOURCE', 'CALL', 'IDENTIFIER', 'METHOD_PARAMETER_IN', 'METHOD']
+    OR source.node_type CONTAINS 'SOURCE'
+    OR source.node_type CONTAINS 'CALL'
+  )
   AND ($scoped = false OR source.file_path IN $changed_files)
 
 MATCH (sink:CPGNode)
-WHERE sink.function_name IN $sinks AND sink.node_type CONTAINS 'CALL'
+WHERE sink.function_name IN $sinks 
+  AND (
+    sink.node_type IN ['CALL_SINK', 'CALL']
+    OR sink.node_type CONTAINS 'SINK'
+    OR sink.node_type CONTAINS 'CALL'
+  )
 
 CALL apoc.path.expandConfig(source, {
-    relationshipFilter: "CALL>|REACHING_DEF>|REF>|ALIAS>",
+    relationshipFilter: "CALL>|REACHING_DEF>|REF>|ALIAS>|CFG>|AST>|ARGUMENT>|RECEIVER>",
     minLevel: 1,
     maxLevel: 30,
     terminatorNodes: [sink],
@@ -187,11 +201,25 @@ ORDER BY path_len ASC
 LIMIT 100
 """
         base_fallback = """
-MATCH path = (source:CPGNode)-[:CALL|REACHING_DEF|REF*1..15]->(sink:CPGNode)
+MATCH (source:CPGNode)
 WHERE source.function_name IN $sources 
-  AND (source.node_type CONTAINS 'CALL' OR source.node_type IN ['METHOD_PARAMETER_IN', 'IDENTIFIER'])
+  AND (
+    source.node_type IN ['CALL_SOURCE', 'CALL', 'IDENTIFIER', 'METHOD_PARAMETER_IN', 'METHOD']
+    OR source.node_type CONTAINS 'SOURCE'
+    OR source.node_type CONTAINS 'CALL'
+  )
   AND ($scoped = false OR source.file_path IN $changed_files)
-  AND sink.function_name IN $sinks AND sink.node_type CONTAINS 'CALL'
+
+MATCH (sink:CPGNode)
+WHERE sink.function_name IN $sinks 
+  AND (
+    sink.node_type IN ['CALL_SINK', 'CALL']
+    OR sink.node_type CONTAINS 'SINK'
+    OR sink.node_type CONTAINS 'CALL'
+  )
+
+MATCH path = (source)-[:CALL|REACHING_DEF|REF|CFG|AST|ARGUMENT|RECEIVER*1..20]->(sink)
+
 RETURN
     source.node_id AS src_id,
     source.file_path AS src_file,

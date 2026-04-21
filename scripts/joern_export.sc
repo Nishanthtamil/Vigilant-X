@@ -14,6 +14,10 @@
           .replace("\t", "\\t")
   }
 
+  // Force dataflow computation before exporting
+  // This generates REACHING_DEF edges across function boundaries
+  run.ossdataflow
+
   // Export a wider set of nodes for better taint tracking
   val nodesList = (cpg.method.l ++ cpg.call.l ++ cpg.controlStructure.l ++ cpg.methodParameterIn.l ++ cpg.local.l ++ cpg.identifier.l).map { n =>
     val id = n.id().toString
@@ -83,7 +87,7 @@
 
   // Export ALL relevant edges for data-flow tracking
   val edgesList = cpg.graph.allEdges.filter(e => 
-    Set("CALL", "CFG", "REACHING_DEF", "REF", "AST", "PARAMETER_LINK").contains(e.label)
+    Set("CALL", "CFG", "REACHING_DEF", "REF", "AST", "PARAMETER_LINK", "ARGUMENT", "RECEIVER").contains(e.label)
   ).map { e =>
     "{" +
       "\"src\":\"" + e.src.id().toString + "\"," +

@@ -35,9 +35,10 @@ class Settings(BaseSettings):
     )
 
     # ── LLM ───────────────────────────────────────────────────────────────────
-    llm_provider: LLMProvider = LLMProvider.GROQ
+    llm_provider: LLMProvider = LLMProvider.ANTHROPIC
 
     groq_api_key: str = ""
+    groq_api_keys: list[str] = []
     groq_model: str = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     openai_api_key: str = ""
@@ -46,10 +47,37 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_model: str = "claude-3-5-sonnet-20241022"
 
+    @field_validator("groq_api_keys", mode="before")
+    @classmethod
+    def _parse_groq_keys(cls, v: Any) -> list[str]:
+        if isinstance(v, list) and v:
+            return v
+        
+        keys = []
+        # 1. Try comma-separated from GROQ_API_KEY or the value itself
+        raw_val = os.environ.get("GROQ_API_KEY", "")
+        if raw_val:
+            if "," in raw_val:
+                keys.extend([k.strip() for k in raw_val.split(",") if k.strip()])
+            else:
+                keys.append(raw_val.strip())
+        
+        # 2. Try GROQ_API_KEY_1, GROQ_API_KEY_2, etc.
+        i = 1
+        while True:
+            key = os.environ.get(f"GROQ_API_KEY_{i}", "")
+            if not key:
+                break
+            if key not in keys:
+                keys.append(key.strip())
+            i += 1
+            
+        return keys
+
     # ── Neo4j ─────────────────────────────────────────────────────────────────
     use_local_neo4j: bool = True
 
-    neo4j_local_uri: str = "bolt://localhost:7688"
+    neo4j_local_uri: str = "bolt://localhost:7687"
     neo4j_local_username: str = "neo4j"
     neo4j_local_password: str = "vigilant_local"
 

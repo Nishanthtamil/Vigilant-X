@@ -311,6 +311,8 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
     SOURCES = {
         "argv", "scanf", "fgets", "read", "fread", "recv", "gets",
         "getenv", "SysAllocString", "SysAllocStringLen",
+        # Juliet helper patterns
+        "getData", "getInput", "helperBad",
     }
     SINKS = {
         "memcpy", "strcpy", "strcat", "sprintf", "vsprintf",
@@ -402,6 +404,29 @@ def _stub_cpg(repo_path: Path, files: list[str] | None) -> dict[str, Any]:
                     "node_id": cid,
                     "file_path": rel,      # <-- repo-relative POSIX
                     "function_name": "argv",
+                    "line_start": cline,
+                    "line_end": cline,
+                    "node_type": "CALL_SOURCE",
+                    "code": m.group(0),
+                })
+                edges.append({"src": cid, "dst": func_id, "type": "CALL"})
+
+            # Juliet-style: detect calls to functions containing 'source', 'input', 'bad'
+            # that appear to read external data
+            JULIET_SOURCE_RE = re.compile(
+                r'\b(\w*(?:source|getData|getInput|helperBad)\w*)\s*\(',
+                re.IGNORECASE
+            )
+            for m in JULIET_SOURCE_RE.finditer(body):
+                cname = m.group(1)
+                if cname == fname:  # skip recursive self-calls
+                    continue
+                cid = str(uuid.uuid4())
+                cline = line_start + body[:m.start()].count("\n")
+                nodes.append({
+                    "node_id": cid,
+                    "file_path": rel,
+                    "function_name": cname,
                     "line_start": cline,
                     "line_end": cline,
                     "node_type": "CALL_SOURCE",

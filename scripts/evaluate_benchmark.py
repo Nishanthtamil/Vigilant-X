@@ -305,7 +305,7 @@ def run_benchmarks():
     print("===========================================")
 
 
-def run_juliet_benchmark(cwe_id: str = "CWE121", max_cases: int = 200) -> None:
+def run_juliet_benchmark(cwe_id: str = "CWE121", max_cases: int = 200, offset: int = 0) -> dict:
     """
     Run Vigilant-X against Juliet Test Suite cases for a specific CWE.
 
@@ -324,17 +324,17 @@ def run_juliet_benchmark(cwe_id: str = "CWE121", max_cases: int = 200) -> None:
         print(f"Juliet dataset for {cwe_id} not found at {juliet_path}")
         print(f"Download from https://samate.nist.gov/SARD/test-suites/116")
         print(f"and extract the {cwe_id} directory to {juliet_path}")
-        return
+        return {}
 
-    bad_files  = sorted(juliet_path.glob("*_bad*.cpp"))[:max_cases]
-    good_files = sorted(juliet_path.glob("*_good*.cpp"))[:max_cases]
+    bad_files  = sorted(juliet_path.glob("*_bad*.cpp"))[offset:offset+max_cases]
+    good_files = sorted(juliet_path.glob("*_good*.cpp"))[offset:offset+max_cases]
     total_files = bad_files + good_files
 
     if not total_files:
         print(f"No test cases found in {juliet_path}")
-        return
+        return {}
 
-    print(f"\nRunning Juliet {cwe_id}: {len(bad_files)} bad + {len(good_files)} good cases")
+    print(f"\nRunning Juliet {cwe_id} (Offset {offset}, Max {max_cases}): {len(bad_files)} bad + {len(good_files)} good cases")
 
     setup_benchmark_repo()
     tp = fp = tn = fn = 0
@@ -353,12 +353,37 @@ def run_juliet_benchmark(cwe_id: str = "CWE121", max_cases: int = 200) -> None:
         except Exception as e:
             print(f"Failed to clear Neo4j: {e}")
 
-        for f in BENCHMARK_REPO.glob("*.cpp"):
-            f.unlink()
+        # Clear the repo before copying new case files
+        for f in BENCHMARK_REPO.glob("*.*"):
+            if f.is_file():
+                f.unlink()
 
-        dest = BENCHMARK_REPO / file_name
-        import shutil as _shutil
-        _shutil.copy2(file_path, dest)
+        # Identify related files (multi-file cases)
+        # Suffixes to strip to find the base prefix: _bad.cpp, _goodG2B.cpp, _goodB2G.cpp, a.cpp, b.cpp, etc.
+        import re as _re
+        base_prefix = _re.sub(r'(_bad|a|b|c|d|e|f|_good[A-Z0-9]+)\.cpp$', '', file_name)
+        
+        related_files = list(juliet_path.glob(f"{base_prefix}*"))
+        import shutil
+        for rf in related_files:
+            shutil.copy2(rf, BENCHMARK_REPO / rf.name)
+            
+        # If headers are missing in the flat directory, try to find them in the raw tree
+        # (Juliet sometimes has headers in the same folder, sometimes in a subfolder)
+        if not any(f.suffix == ".h" for f in related_files):
+            raw_base = ROOT_DIR / "benchmarks" / "juliet_raw" / "C" / "testcases"
+            # search for the header in the raw tree (slow but only done if missing)
+            potential_headers = list(raw_base.rglob(f"{base_prefix}*.h"))
+            for h in potential_headers:
+                shutil.copy2(h, BENCHMARK_REPO / h.name)
+
+        # Also copy standard support headers
+        support_dir = ROOT_DIR / "benchmarks" / "juliet_raw" / "C" / "testcasesupport"
+        if support_dir.exists():
+            for h in support_dir.glob("*.h"):
+                shutil.copy2(h, BENCHMARK_REPO / h.name)
+            for c in support_dir.glob("*.c"):
+                shutil.copy2(c, BENCHMARK_REPO / c.name)
 
         try:
             state = run_review(
@@ -366,7 +391,7 @@ def run_juliet_benchmark(cwe_id: str = "CWE121", max_cases: int = 200) -> None:
                 pr_number=0,
                 base_sha="main",
                 head_sha="head",
-                changed_files=[file_name],
+                changed_files=[file_name], # We only "changed" the bad/good file
                 dry_run=True,
             )
             critical_vulns = [
@@ -423,6 +448,8 @@ def run_juliet_benchmark(cwe_id: str = "CWE121", max_cases: int = 200) -> None:
     print(f"FPR:        {fpr:.3f}")
     print(f"Total time: {elapsed:.1f}s ({elapsed/len(total_files):.1f}s/file)")
     print(f"{'='*50}")
+    
+    return {"tp": tp, "fp": fp, "tn": tn, "fn": fn, "elapsed": elapsed, "count": len(total_files)}
 
 
 if __name__ == "__main__":
@@ -431,6 +458,9 @@ if __name__ == "__main__":
         idx = sys.argv.index("--juliet")
         cwe = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else "CWE121"
         max_n = int(sys.argv[idx + 2]) if idx + 2 < len(sys.argv) else 200
-        run_juliet_benchmark(cwe, max_n)
+        offset = 0
+        if "--offset" in sys.argv:
+            offset = int(sys.argv[sys.argv.index("--offset") + 1])
+        run_juliet_benchmark(cwe, max_n, offset)
     else:
         run_benchmarks()
