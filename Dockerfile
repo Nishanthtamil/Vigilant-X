@@ -25,10 +25,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     openjdk-17-jre-headless \
     python3 \
+    unzip \
+    wget \
     && update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100 \
     && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-17 100 \
     && update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-17 100 \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage 1a: Install Joern
+# ─────────────────────────────────────────────────────────────────────────────
+RUN wget https://github.com/joernio/joern/releases/latest/download/joern-cli.zip -O /tmp/joern-cli.zip && \
+    unzip /tmp/joern-cli.zip -d /opt && \
+    mv /opt/joern-cli /opt/joern && \
+    rm /tmp/joern-cli.zip && \
+    ln -s /opt/joern/joern /usr/local/bin/joern && \
+    ln -s /opt/joern/joern-parse /usr/local/bin/joern-parse && \
+    ln -s /opt/joern/joern-export /usr/local/bin/joern-export
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 1b: Build instrumented libc++ for MSan

@@ -109,37 +109,40 @@ The CLI surfaces clear warnings about the active tier:
 
 ---
 
-## 🚀 Quickstart
+## 🚀 Quickstart (Easy Setup)
 
-### 1. Clone & Install
+Get up and running in one command. This script installs Joern, sets up your Python environment, creates your `.env`, and starts Neo4j.
 
 ```bash
 git clone https://github.com/Nishanthtamil/Vigilant-X.git
 cd Vigilant-X
-pip install -e ".[dev]"
+./setup.sh
 ```
 
-### 2. Configure
+### Manual Installation (Advanced)
+
+If you prefer to manage dependencies manually:
+
+1.  **Clone & Install**:
+    ```bash
+    pip install -e ".[dev]"
+    ```
+2.  **Install Joern**: Ensure `joern` is on your `PATH`.
+3.  **Configure**: `cp .env.example .env` and fill in your keys.
+4.  **Start Services**: `docker-compose up neo4j -d`
+
+---
+
+## 🐳 Docker Usage
+
+Run Vigilant-X entirely inside Docker to avoid local dependency issues:
 
 ```bash
-cp .env.example .env
-# Required: GROQ_API_KEY, GITHUB_TOKEN, NEO4J_PASSWORD
-```
+# Build the orchestrator and sandbox
+docker-compose build
 
-### 3. Start Infrastructure
-
-```bash
-docker-compose up neo4j -d
-```
-
-### 4. Run a Deep Security Review
-
-```bash
-# Dry-run locally
-vigilant-x review --repo . --pr-number 0 --dry-run
-
-# Full CI integration
-vigilant-x review --repo owner/repo --pr-number 123
+# Run a review on a local project (mounted to /app)
+docker-compose run --rm vigilant-x python -m vigilant.cli review --repo /app --pr-number 0 --dry-run
 ```
 
 ---
