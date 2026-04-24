@@ -8,10 +8,37 @@ set -e
 
 echo "🔍 Starting Vigilant-X setup..."
 
-# 1. Check for Java (required by Joern)
+# 1. Check and Install Java (required by Joern)
+install_java() {
+    echo "☕ Java not found. Attempting to install OpenJDK 17..."
+    if command -v apt-get &> /dev/null; then
+        sudo apt-get update && sudo apt-get install -y openjdk-17-jre-headless
+    elif command -v brew &> /dev/null; then
+        brew install openjdk@17
+    elif command -v yum &> /dev/null; then
+        sudo yum install -y java-17-openjdk
+    else
+        echo "❌ Could not find a supported package manager (apt, brew, yum). Please install Java 17+ manually."
+        exit 1
+    fi
+}
+
 if ! command -v java &> /dev/null; then
-    echo "❌ Java not found. Joern requires Java 17+. Please install it first."
-    exit 1
+    install_java
+else
+    # Quick check for version >= 11
+    JAVA_VER=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}' | cut -d. -f1)
+    # Handle version format like "1.8.0" vs "17.0.1"
+    if [ "$JAVA_VER" = "1" ]; then
+        JAVA_VER=$(java -version 2>&1 | head -n 1 | awk -F '"' '{print $2}' | cut -d. -f2)
+    fi
+    
+    if [ "$JAVA_VER" -lt 11 ]; then
+        echo "⚠️ Java version is too old ($JAVA_VER). Joern requires Java 11+ (17 recommended)."
+        install_java
+    else
+        echo "✅ Java version $JAVA_VER is already available."
+    fi
 fi
 
 # 2. Setup Python environment

@@ -107,16 +107,22 @@ The CLI surfaces clear warnings about the active tier:
 ⚠ Neither Joern nor clang-tidy found — regex stub active. Coverage severely limited.
 ```
 
----
-
 ## 🚀 Quickstart (Easy Setup)
 
-Get up and running in one command. This script installs Joern, sets up your Python environment, creates your `.env`, and starts Neo4j.
+Get up and running in one command. These scripts install Java, Joern, set up your Python environment, and start Neo4j.
 
+### Linux / macOS
 ```bash
 git clone https://github.com/Nishanthtamil/Vigilant-X.git
 cd Vigilant-X
 ./setup.sh
+```
+
+### Windows (PowerShell)
+```powershell
+git clone https://github.com/Nishanthtamil/Vigilant-X.git
+cd Vigilant-X
+.\setup.ps1
 ```
 
 ### Manual Installation (Advanced)

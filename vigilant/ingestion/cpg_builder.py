@@ -169,9 +169,21 @@ def _run_joern(repo_path: Path, files: list[str] | None = None) -> dict[str, Any
 def _find_joern() -> str | None:
     """Locate the joern binary on PATH or in the local joern/ directory."""
     import shutil
-    local_joern = Path(__file__).parent.parent.parent / "joern" / "joern"
+    import sys
+    
+    root_dir = Path(__file__).parent.parent.parent
+    local_joern = root_dir / "joern" / "joern"
+    
+    # Check local directory first
+    if sys.platform == "win32":
+        win_local = local_joern.with_suffix(".bat")
+        if win_local.exists():
+            return str(win_local)
+    
     if local_joern.exists():
         return str(local_joern)
+        
+    # Fallback to PATH
     return shutil.which("joern") or shutil.which("joern-cli")
 
 
